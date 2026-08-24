@@ -1,0 +1,30 @@
+import jwt from 'jsonwebtoken';
+import { config } from '../config.js';
+
+/**
+ * Reads a bearer token (or `token` cookie, if you prefer httpOnly cookies over
+ * an Authorization header from Nuxt) and verifies it as a Strapi
+ * users-permissions JWT. On success, req.userId is set; on failure, it's left
+ * undefined and req.user stays anonymous — routes decide whether that's
+ * acceptable (e.g. edition *metadata* might be visible to anonymous users so
+ * the paywall can show a locked preview, but the actual page image never is).
+ */
+export function attachUser(req, _res, next) {
+  const header = req.headers.authorization || '';
+  const bearer = header.startsWith('Bearer ') ? header.slice(7) : null;
+  const token = bearer || req.cookies?.token;
+  if (!token) return next();
+
+  try {
+    const payload = jwt.verify(token, config.jwtSecret);
+    req.userId = payload.id; // Strapi's users-permissions JWT payload shape: { id, iat, exp }
+  } catch {
+    // invalid/expired token — treat as anonymous rather than erroring the request
+  }
+  next();
+}
+
+export function requireUser(req, res, next) {
+  if (!req.userId) return res.status(401).json({ error: 'Sign in required' });
+  next();
+}

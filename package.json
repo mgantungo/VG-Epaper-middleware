@@ -1,0 +1,19 @@
+{
+  "name": "@newvision/middleware",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sits between the Nuxt app and Strapi: checks entitlements, proxies edition content, and handles the payment gateway webhook.",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "node-fetch": "^3.3.2",
+    "cookie-parser": "^1.4.6",
+    "jsonwebtoken": "^9.0.2",
+    "dotenv": "^16.4.5",
+    "cors": "^2.8.5"
+  }
+}
