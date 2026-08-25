@@ -31,16 +31,22 @@ export const authRouter = Router();
  *   Settings -> Users & Permissions -> Roles -> Public
  *   -> Permissions -> Users-permissions -> Auth -> `connect` (login),
  *      Users-permissions -> Auth -> `register` are BOTH checked.
+ *
+ * Every step below logs to console on purpose right now — this is
+ * deliberately noisy while we're diagnosing why refresh isn't sticking.
+ * Trim it down once this is confirmed working end-to-end.
  */
 
 /** Copy every Set-Cookie header from a node-fetch Response onto our own
  * Express response. Using `.raw()['set-cookie']` (a node-fetch-specific
  * extension, not standard Fetch) rather than `.get('set-cookie')` matters
  * here — .get() would silently comma-join multiple Set-Cookie headers into
- * one unparseable string, corrupting the cookie. */
+ * one unparseable string, corrupting the cookie. Returns what it found, so
+ * callers can log it. */
 function relayStrapiCookies(strapiRes, res) {
-  const raw = strapiRes.headers.raw?.()['set-cookie'];
-  if (raw?.length) res.setHeader('Set-Cookie', raw);
+  const raw = strapiRes.headers.raw?.()['set-cookie'] || [];
+  if (raw.length) res.setHeader('Set-Cookie', raw);
+  return raw;
 }
 
 authRouter.post('/login', async (req, res) => {
@@ -56,11 +62,14 @@ authRouter.post('/login', async (req, res) => {
     });
     const data = await strapiRes.json();
     if (!strapiRes.ok) {
+      console.warn(`[auth] login failed for "${identifier}": ${strapiRes.status} ${data?.error?.message}`);
       return res.status(strapiRes.status).json({ error: data?.error?.message || 'Login failed' });
     }
-    relayStrapiCookies(strapiRes, res);
+    const cookies = relayStrapiCookies(strapiRes, res);
+    console.log(`[auth] login OK for "${identifier}" — Strapi sent ${cookies.length} cookie(s): ${cookies.map(c => c.split('=')[0]).join(', ') || '(none!)'}`);
     res.json({ jwt: data.jwt, user: { id: data.user.id, username: data.user.username, email: data.user.email } });
   } catch (err) {
+    console.error('[auth] login: could not reach Strapi:', err.message);
     res.status(502).json({ error: 'Could not reach Strapi' });
   }
 });
@@ -78,11 +87,14 @@ authRouter.post('/register', async (req, res) => {
     });
     const data = await strapiRes.json();
     if (!strapiRes.ok) {
+      console.warn(`[auth] register failed for "${email}": ${strapiRes.status} ${data?.error?.message}`);
       return res.status(strapiRes.status).json({ error: data?.error?.message || 'Registration failed' });
     }
-    relayStrapiCookies(strapiRes, res);
+    const cookies = relayStrapiCookies(strapiRes, res);
+    console.log(`[auth] register OK for "${email}" — Strapi sent ${cookies.length} cookie(s): ${cookies.map(c => c.split('=')[0]).join(', ') || '(none!)'}`);
     res.json({ jwt: data.jwt, user: { id: data.user.id, username: data.user.username, email: data.user.email } });
   } catch (err) {
+    console.error('[auth] register: could not reach Strapi:', err.message);
     res.status(502).json({ error: 'Could not reach Strapi' });
   }
 });
@@ -94,8 +106,10 @@ authRouter.post('/register', async (req, res) => {
  * `authedFetch` in apps/web/composables/useEpaperApi.js.
  */
 authRouter.post('/refresh', async (req, res) => {
+  console.log(`[auth] /refresh called — incoming cookies present: ${Object.keys(req.cookies || {}).join(', ') || '(none)'}`);
   const refreshToken = req.cookies?.strapi_up_refresh;
   if (!refreshToken) {
+    console.warn('[auth] /refresh: no strapi_up_refresh cookie on the incoming request — nothing to exchange');
     return res.status(401).json({ error: 'No refresh token — sign in again' });
   }
   try {
@@ -106,11 +120,14 @@ authRouter.post('/refresh', async (req, res) => {
     });
     const data = await strapiRes.json();
     if (!strapiRes.ok) {
+      console.warn(`[auth] /refresh: Strapi rejected the refresh token: ${strapiRes.status} ${data?.error?.message}`);
       return res.status(strapiRes.status).json({ error: data?.error?.message || 'Session expired — sign in again' });
     }
-    relayStrapiCookies(strapiRes, res); // Strapi rotates the refresh token on every use — the new one replaces the old
+    const cookies = relayStrapiCookies(strapiRes, res); // Strapi rotates the refresh token on every use — the new one replaces the old
+    console.log(`[auth] /refresh OK — issued new access token, Strapi rotated ${cookies.length} cookie(s)`);
     res.json({ jwt: data.jwt });
   } catch (err) {
+    console.error('[auth] /refresh: could not reach Strapi:', err.message);
     res.status(502).json({ error: 'Could not reach Strapi' });
   }
 });
