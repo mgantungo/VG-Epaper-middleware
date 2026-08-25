@@ -18,6 +18,7 @@ export function attachUser(req, _res, next) {
   try {
     const payload = jwt.verify(token, config.jwtSecret);
     req.userId = payload.id; // Strapi's users-permissions JWT payload shape: { id, iat, exp }
+    req.userToken = token; // raw token, so routes can forward it to Strapi's own /api/users/me if needed
   } catch {
     // invalid/expired token — treat as anonymous rather than erroring the request
   }

@@ -6,6 +6,7 @@ import { attachUser } from './middleware/auth.js';
 import { editionsRouter } from './routes/editions.js';
 import { paymentsRouter } from './routes/payments.js';
 import { accountRouter } from './routes/account.js';
+import { authRouter } from './routes/auth.js';
 
 const app = express();
 
@@ -27,6 +28,7 @@ app.use(attachUser);
 app.use('/api/editions', editionsRouter);
 app.use('/api/pay', paymentsRouter);
 app.use('/api/account', accountRouter);
+app.use('/api/auth', authRouter);
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
