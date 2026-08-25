@@ -11,14 +11,20 @@ export const paymentsRouter = Router();
 /**
  * POST /api/pay/checkout
  * Body: { date: "YYYY-MM-DD" | "today" }
- * Creates a pending Purchase (or, for "today", just returns subscription
- * pricing — you may not need a pending record for a recurring subscription
- * depending on how your gateway models it) and returns whatever your gateway
- * needs the frontend to redirect to / open.
  *
- * This is the seam where your real gateway's SDK/API call goes. Replace the
- * `checkoutUrl` placeholder below with the real "create a checkout session"
- * call, and pass its result straight through to the frontend.
+ * ⚠️ TEMPORARY "ASSUME YES" MODE — no real payment gateway is wired in yet.
+ * This grants access IMMEDIATELY, server-side, as if payment had already
+ * succeeded — no money moves, no gateway is contacted, no webhook fires.
+ * It exists so the rest of the app (paywall -> checkout -> unlock -> read)
+ * can be tested and demoed end-to-end before a real gateway is chosen.
+ *
+ * TO WIRE IN A REAL GATEWAY LATER: delete the "grant immediately" block
+ * below and replace it with a real "create checkout session" call, same as
+ * the comment further down in /webhook describes. Nothing else in this
+ * app — not the frontend, not /pay/return, not the paywall — needs to
+ * change; they were built expecting checkoutUrl to point at your gateway
+ * and /webhook to confirm completion, this is just a stand-in for both of
+ * those in one place until that's ready.
  */
 paymentsRouter.post('/checkout', async (req, res) => {
   if (!req.userId) return res.status(401).json({ error: 'Sign in required' });
@@ -35,16 +41,36 @@ paymentsRouter.post('/checkout', async (req, res) => {
     if (!editionDocumentId) return res.status(404).json({ error: 'No edition for that date' });
     const purchase = await createPurchase({
       userId: req.userId, editionDocumentId, amount, currency,
-      provider: 'your-gateway', providerReference: null, status: 'pending'
+      provider: 'assume-yes', providerReference: null, status: 'pending'
     });
     purchaseId = purchase.data.documentId; // Strapi 5: mutate/reference documents by documentId, not id
   }
 
-  // TODO: replace with your real gateway's "create checkout session" call.
-  // Pass purchaseId (or a subscription-intent id) through as metadata so the
-  // webhook below can find the right record when the gateway calls back.
+  // --- grant immediately, as if a gateway had just confirmed payment ---
+  if (isToday) {
+    const periodEnd = new Date();
+    periodEnd.setDate(periodEnd.getDate() + 30); // matches the "/ month" pricing shown in the UI
+    await upsertActiveSubscription({
+      userId: req.userId,
+      provider: 'assume-yes',
+      providerSubscriptionId: null,
+      currentPeriodEnd: periodEnd.toISOString()
+    });
+  } else {
+    await markPurchaseCompleted(purchaseId);
+  }
+  // --- end of the part to delete once a real gateway is wired in ---
+
+  // checkoutUrl points back at this app's own return page instead of an
+  // external gateway, since there's nothing external to redirect to yet.
+  // The frontend (PaywallModal.vue) appends `&returnTo=...` to whatever URL
+  // comes back here — that's meant for a real gateway to know where to send
+  // the reader after ITS hosted checkout page, so it's harmless-but-unused
+  // in this stand-in mode. The `?date=` here is what actually matters: it's
+  // what /pay/return reads to know which edition to poll for, and it polls
+  // successfully almost immediately since access was already granted above.
   res.json({
-    checkoutUrl: `https://your-gateway.example.com/checkout?ref=${purchaseId || 'subscription'}&amount=${amount}&currency=${currency}`,
+    checkoutUrl: `${config.webOrigin}/pay/return?date=${dateIso}`,
     purchaseId,
     amount,
     currency,
