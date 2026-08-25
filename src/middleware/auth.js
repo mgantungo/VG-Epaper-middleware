@@ -19,8 +19,14 @@ export function attachUser(req, _res, next) {
     const payload = jwt.verify(token, config.jwtSecret);
     req.userId = payload.id; // Strapi's users-permissions JWT payload shape: { id, iat, exp }
     req.userToken = token; // raw token, so routes can forward it to Strapi's own /api/users/me if needed
-  } catch {
-    // invalid/expired token — treat as anonymous rather than erroring the request
+  } catch (err) {
+    // A token WAS provided but failed verification — unlike "no token at
+    // all" (silently anonymous, completely normal for a logged-out
+    // visitor), this is always worth knowing about: almost always means
+    // JWT_SECRET here doesn't match Strapi's, or the token's genuinely
+    // expired/tampered. Logging it is what turns "user says they're stuck
+    // signed out" into an instant answer instead of a guessing game.
+    console.warn(`[middleware auth] rejected token: ${err.message}`);
   }
   next();
 }
