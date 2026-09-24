@@ -1,56 +1,41 @@
-import fetch from 'node-fetch';
-import { config } from '../config.js';
+import { verifyAccessToken } from '../services/tokens.js';
 
 /**
- * Reads a bearer token (or `token` cookie) and verifies it by asking Strapi
- * itself who it belongs to (GET /api/users/me), rather than re-verifying
- * the JWT locally with jsonwebtoken + a shared secret.
+ * Reads a bearer token (or `token` cookie) and verifies it LOCALLY — no
+ * network call to Strapi per request. This used to require asking Strapi
+ * to validate every token itself (GET /api/users/me on every authenticated
+ * request), specifically because Strapi's jwtManagement:'refresh' Session
+ * Manager signs tokens with an internal secret that isn't consistently
+ * documented across versions — see the git history on this file for that
+ * whole saga. Now that we sign our own tokens with our own
+ * JWT_ACCESS_SECRET (services/tokens.js), that ambiguity is gone entirely,
+ * and local verification — the normal, fast way JWTs are supposed to work
+ * — is correct again.
  *
- * This used to do local verification against JWT_SECRET. That broke once
- * this Strapi project's `jwtManagement: 'refresh'` mode came into play:
- * that mode issues tokens via Strapi's newer Session Manager, and separate
- * Strapi bug reports (github.com/strapi/strapi issues #24766, #26365) show
- * Session Manager requiring its OWN secret (`admin.auth.secret`) — not
- * necessarily the plain JWT_SECRET the older long-lived-JWT model used.
- * That distinction isn't documented consistently across Strapi versions,
- * so rather than keep guessing at an internal, version-fragile
- * implementation detail, this asks Strapi to validate the token itself —
- * correct regardless of which auth mode or Strapi version is running
- * underneath, now or after a future upgrade.
- *
- * Trade-off: one extra HTTP call per authenticated request instead of a
- * local, no-network signature check. Acceptable for this app's traffic
- * level in exchange for not being wrong about auth. If that ever needs
- * optimizing, cache the token->user lookup for a few seconds rather than
- * reintroducing local verification.
- *
- * req.userProfile is populated here too (not just req.userId) so routes
- * that need username/email — see routes/account.js — don't need a second,
- * duplicate call to /api/users/me.
+ * req.userProfile comes directly out of the token payload (email/
+ * displayName were embedded at sign time) — no second lookup needed for
+ * the common case. Routes that need a guaranteed-current profile (e.g.
+ * after a display-name change) should still re-fetch explicitly.
  */
-export async function attachUser(req, _res, next) {
+export function attachUser(req, _res, next) {
   const header = req.headers.authorization || '';
   const bearer = header.startsWith('Bearer ') ? header.slice(7) : null;
   const token = bearer || req.cookies?.token;
   if (!token) return next();
 
   try {
-    const strapiRes = await fetch(`${config.strapiUrl}/api/users/me`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    if (strapiRes.ok) {
-      const user = await strapiRes.json();
-      req.userId = user.id;
-      req.userToken = token;
-      req.userProfile = { id: user.id, username: user.username, email: user.email };
-    } else {
-      // A token WAS provided but Strapi rejected it — unlike "no token at
-      // all" (silently anonymous, completely normal for a logged-out
-      // visitor), this is always worth knowing about.
-      console.warn(`[middleware auth] Strapi rejected token: ${strapiRes.status}`);
-    }
+    const payload = verifyAccessToken(token);
+    req.userId = payload.sub;
+    req.userToken = token;
+    req.userProfile = { id: payload.sub, email: payload.email, displayName: payload.displayName };
   } catch (err) {
-    console.error('[middleware auth] could not reach Strapi to verify token:', err.message);
+    // A token WAS provided but failed verification — unlike "no token at
+    // all" (silently anonymous, completely normal for a logged-out
+    // visitor), this is always worth knowing about: expired access token
+    // (expected regularly, the frontend's authedFetch retries via
+    // /api/auth/refresh automatically — see useEpaperApi.js), or something
+    // genuinely wrong (bad signature, tampered token).
+    console.warn(`[middleware auth] rejected token: ${err.message}`);
   }
   next();
 }

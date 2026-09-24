@@ -1,11 +1,16 @@
 import { Router } from 'express';
 import fetch from 'node-fetch';
 import { config } from '../config.js';
-import { getEditionByDate, getPageImageUrl, getPurchasedDates } from '../services/strapiClient.js';
+import { getEditionByDate, getPageImageUrl, getEntitlementRanges } from '../services/strapiClient.js';
 import { hasAccess, todayIso } from '../services/access.js';
 
 export const editionsRouter = Router();
 
+// NOTE: still reading static config.pricing here, not epaper-plan's actual
+// price — deliberately left as-is for this pass, since wiring the paywall's
+// displayed price to real Plan records belongs with the /checkout rebuild
+// (the next item in the series), not this entitlement-checking one. This
+// will need to change then, not forgotten, just sequenced.
 function priceFor(dateIso, edition) {
   if (dateIso === todayIso()) {
     return { amount: config.pricing.subscription, currency: config.pricing.subscriptionCurrency, kind: 'subscription' };
@@ -105,8 +110,11 @@ editionsRouter.get('/:date/pages/:num.jpg', async (req, res) => {
   upstream.body.pipe(res);
 });
 
-/** Which archive dates has the signed-in user already unlocked? Powers the lock badges in the Archive UI. */
+/** This user's entitlement date ranges — powers the lock badges in the
+ * Archive UI. Was `{ dates: [...] }` (flat list); now `{ ranges: [...] }`,
+ * since one entitlement can span a whole subscription period, not just a
+ * single purchased day — see getEntitlementRanges()'s own comment. */
 editionsRouter.get('/me/purchased-dates', async (req, res) => {
-  if (!req.userId) return res.json({ dates: [] });
-  res.json({ dates: await getPurchasedDates(req.userId) });
+  if (!req.userId) return res.json({ ranges: [] });
+  res.json({ ranges: await getEntitlementRanges(req.userId) });
 });

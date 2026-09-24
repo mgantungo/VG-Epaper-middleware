@@ -1,133 +1,114 @@
 import { Router } from 'express';
-import fetch from 'node-fetch';
-import { config } from '../config.js';
+import {
+  registerEpaperUser, verifyEpaperUserCredentials, getEpaperUserProfile, bumpEpaperUserTokenVersion
+} from '../services/epaperUserClient.js';
+import {
+  signAccessToken, signRefreshToken, verifyRefreshToken, REFRESH_COOKIE_NAME, REFRESH_COOKIE_MAX_AGE_MS
+} from '../services/tokens.js';
 
 export const authRouter = Router();
 
 /**
- * These are thin proxies to Strapi's built-in Users & Permissions plugin —
- * consistent with the rest of this app's rule that Nuxt never talks to
- * Strapi directly. This is NOT the ingest/CMS service-to-service auth
- * (STRAPI_API_TOKEN) — this is real reader accounts.
+ * Register/login/refresh/logout, now built on our own epaper-user identity
+ * store and our own signed JWTs — see services/tokens.js for why this
+ * replaces the earlier Strapi-Session-Manager-backed design.
  *
- * IMPORTANT — this Strapi project is scaffolded with
- * `jwtManagement: 'refresh'` in config/plugins.js (the current
- * create-strapi-app default), NOT the older long-lived-JWT ("legacy")
- * model. That means:
- *   - The `jwt` returned from login/register is a SHORT-LIVED access token
- *     (minutes, not the 30-day default of legacy mode) — it's *expected*
- *     to expire during normal use, not a bug.
- *   - Renewing it requires a separate refresh token, which Strapi sets as
- *     an httpOnly cookie on ITS OWN response (since config/plugins.js has
- *     `sessions.httpOnly: true`) — invisible to JS, by design.
- *   - Because Nuxt never talks to Strapi directly, that httpOnly cookie
- *     arrives on OUR server-to-server fetch() call to Strapi, not on the
- *     browser's request to us. relayStrapiCookies() below re-sets it on
- *     THIS response instead, so the browser ends up holding a refresh
- *     cookie scoped to the middleware's own domain — which is exactly
- *     where /refresh (below) expects to find it again later.
- *
- * Before this works, confirm in Strapi admin:
- *   Settings -> Users & Permissions -> Roles -> Public
- *   -> Permissions -> Users-permissions -> Auth -> `connect` (login),
- *      Users-permissions -> Auth -> `register` are BOTH checked.
- *
- * Every step below logs to console on purpose right now — this is
- * deliberately noisy while we're diagnosing why refresh isn't sticking.
- * Trim it down once this is confirmed working end-to-end.
+ * The refresh cookie is scoped to path: '/api/auth' — it's only ever
+ * needed by /refresh and /logout below, so there's no reason for the
+ * browser to attach it to every other request to this server. This is
+ * unrelated to the frontend's existing authedFetch retry-on-401 logic
+ * (apps/web/composables/useEpaperApi.js) — that code just calls
+ * POST /api/auth/refresh with credentials:'include' when anything 401s,
+ * which still works unchanged: that request IS to a /api/auth path, so
+ * the scoped cookie is still sent on it.
  */
 
-/** Copy every Set-Cookie header from a node-fetch Response onto our own
- * Express response. Using `.raw()['set-cookie']` (a node-fetch-specific
- * extension, not standard Fetch) rather than `.get('set-cookie')` matters
- * here — .get() would silently comma-join multiple Set-Cookie headers into
- * one unparseable string, corrupting the cookie. Returns what it found, so
- * callers can log it. */
-function relayStrapiCookies(strapiRes, res) {
-  const raw = strapiRes.headers.raw?.()['set-cookie'] || [];
-  if (raw.length) res.setHeader('Set-Cookie', raw);
-  return raw;
+function setRefreshCookie(res, token) {
+  res.cookie(REFRESH_COOKIE_NAME, token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: REFRESH_COOKIE_MAX_AGE_MS,
+    path: '/api/auth'
+  });
+}
+function clearRefreshCookie(res) {
+  res.clearCookie(REFRESH_COOKIE_NAME, { path: '/api/auth' });
 }
 
-authRouter.post('/login', async (req, res) => {
-  const { identifier, password } = req.body || {};
-  if (!identifier || !password) {
-    return res.status(400).json({ error: 'identifier and password are required' });
-  }
-  try {
-    const strapiRes = await fetch(`${config.strapiUrl}/api/auth/local`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ identifier, password })
-    });
-    const data = await strapiRes.json();
-    if (!strapiRes.ok) {
-      console.warn(`[auth] login failed for "${identifier}": ${strapiRes.status} ${data?.error?.message}`);
-      return res.status(strapiRes.status).json({ error: data?.error?.message || 'Login failed' });
-    }
-    const cookies = relayStrapiCookies(strapiRes, res);
-    console.log(`[auth] login OK for "${identifier}" — Strapi sent ${cookies.length} cookie(s): ${cookies.map(c => c.split('=')[0]).join(', ') || '(none!)'}`);
-    res.json({ jwt: data.jwt, user: { id: data.user.id, username: data.user.username, email: data.user.email } });
-  } catch (err) {
-    console.error('[auth] login: could not reach Strapi:', err.message);
-    res.status(502).json({ error: 'Could not reach Strapi' });
-  }
-});
-
 authRouter.post('/register', async (req, res) => {
-  const { username, email, password } = req.body || {};
-  if (!username || !email || !password) {
-    return res.status(400).json({ error: 'username, email and password are required' });
+  const { email, password, displayName, phone } = req.body || {};
+  if (!email || !password) {
+    return res.status(400).json({ error: 'email and password are required' });
   }
-  try {
-    const strapiRes = await fetch(`${config.strapiUrl}/api/auth/local/register`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ username, email, password })
-    });
-    const data = await strapiRes.json();
-    if (!strapiRes.ok) {
-      console.warn(`[auth] register failed for "${email}": ${strapiRes.status} ${data?.error?.message}`);
-      return res.status(strapiRes.status).json({ error: data?.error?.message || 'Registration failed' });
-    }
-    const cookies = relayStrapiCookies(strapiRes, res);
-    console.log(`[auth] register OK for "${email}" — Strapi sent ${cookies.length} cookie(s): ${cookies.map(c => c.split('=')[0]).join(', ') || '(none!)'}`);
-    res.json({ jwt: data.jwt, user: { id: data.user.id, username: data.user.username, email: data.user.email } });
-  } catch (err) {
-    console.error('[auth] register: could not reach Strapi:', err.message);
-    res.status(502).json({ error: 'Could not reach Strapi' });
+  const result = await registerEpaperUser({ email, password, displayName, phone });
+  if (!result.ok) {
+    return res.status(result.status).json({ error: result.data?.error || 'Registration failed' });
   }
+  const { user, tokenVersion } = result.data;
+  setRefreshCookie(res, signRefreshToken(user.id, tokenVersion));
+  res.json({ jwt: signAccessToken(user), user });
 });
 
-/**
- * Exchanges the httpOnly refresh cookie (set on /login or /register above)
- * for a new short-lived access token, without the reader needing to log in
- * again. The frontend calls this automatically when a request 401s — see
- * `authedFetch` in apps/web/composables/useEpaperApi.js.
- */
+authRouter.post('/login', async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) {
+    return res.status(400).json({ error: 'email and password are required' });
+  }
+  const result = await verifyEpaperUserCredentials({ email, password });
+  if (!result.ok || !result.data?.success) {
+    // Deliberately the same generic message whether the email doesn't
+    // exist or the password's wrong — same email-enumeration reasoning as
+    // the constant-time compare on the Strapi side.
+    return res.status(401).json({ error: 'Invalid email or password' });
+  }
+  const { user, tokenVersion } = result.data;
+  setRefreshCookie(res, signRefreshToken(user.id, tokenVersion));
+  res.json({ jwt: signAccessToken(user), user });
+});
+
 authRouter.post('/refresh', async (req, res) => {
-  console.log(`[auth] /refresh called — incoming cookies present: ${Object.keys(req.cookies || {}).join(', ') || '(none)'}`);
-  const refreshToken = req.cookies?.strapi_up_refresh;
+  const refreshToken = req.cookies?.[REFRESH_COOKIE_NAME];
   if (!refreshToken) {
-    console.warn('[auth] /refresh: no strapi_up_refresh cookie on the incoming request — nothing to exchange');
     return res.status(401).json({ error: 'No refresh token — sign in again' });
   }
+
+  let payload;
   try {
-    const strapiRes = await fetch(`${config.strapiUrl}/api/auth/refresh`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ refreshToken })
-    });
-    const data = await strapiRes.json();
-    if (!strapiRes.ok) {
-      console.warn(`[auth] /refresh: Strapi rejected the refresh token: ${strapiRes.status} ${data?.error?.message}`);
-      return res.status(strapiRes.status).json({ error: data?.error?.message || 'Session expired — sign in again' });
-    }
-    const cookies = relayStrapiCookies(strapiRes, res); // Strapi rotates the refresh token on every use — the new one replaces the old
-    console.log(`[auth] /refresh OK — issued new access token, Strapi rotated ${cookies.length} cookie(s)`);
-    res.json({ jwt: data.jwt });
-  } catch (err) {
-    console.error('[auth] /refresh: could not reach Strapi:', err.message);
-    res.status(502).json({ error: 'Could not reach Strapi' });
+    payload = verifyRefreshToken(refreshToken);
+  } catch {
+    clearRefreshCookie(res);
+    return res.status(401).json({ error: 'Session expired — sign in again' });
   }
+
+  const profile = await getEpaperUserProfile(payload.sub);
+  // tokenVersion mismatch means this refresh token was already revoked —
+  // logout, or a future password-change flow bumping it — a token that's
+  // still structurally valid (correct signature, not expired) but has been
+  // deliberately invalidated since it was issued.
+  if (!profile || !profile.active || profile.tokenVersion !== payload.tokenVersion) {
+    clearRefreshCookie(res);
+    return res.status(401).json({ error: 'Session no longer valid — sign in again' });
+  }
+
+  res.json({ jwt: signAccessToken(profile.user) });
+});
+
+authRouter.post('/logout', async (req, res) => {
+  // Deliberately NOT gated behind requireUser/a valid access token — a
+  // reader should be able to log out even if their short-lived access
+  // token has already expired, as long as they still hold a refresh
+  // cookie. If there's no valid refresh token either, there's simply
+  // nothing server-side to revoke, and that's fine.
+  const refreshToken = req.cookies?.[REFRESH_COOKIE_NAME];
+  if (refreshToken) {
+    try {
+      const payload = verifyRefreshToken(refreshToken);
+      await bumpEpaperUserTokenVersion(payload.sub);
+    } catch {
+      // already invalid/expired — nothing to revoke, continue clearing the cookie regardless
+    }
+  }
+  clearRefreshCookie(res);
+  res.json({ success: true });
 });

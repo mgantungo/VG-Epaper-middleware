@@ -19,32 +19,71 @@ async function strapiPost(path, body) {
   if (!res.ok) throw new StrapiError(res.status, await res.text());
   return res.json();
 }
-async function strapiPut(path, body) {
-  const res = await fetch(`${config.strapiUrl}${path}`, {
-    method: 'PUT',
-    headers: authHeaders({ 'content-type': 'application/json' }),
-    body: JSON.stringify(body)
-  });
-  if (!res.ok) throw new StrapiError(res.status, await res.text());
-  return res.json();
-}
 
 export class StrapiError extends Error {
   constructor(status, body) { super(`Strapi ${status}: ${body}`); this.status = status; }
 }
 
 /**
- * Strapi 5's REST API is flattened — no more `.attributes` wrapper, fields
- * are directly on the object — and mutations (PUT/DELETE) address a document
- * by its `documentId` (string), not the legacy numeric `id`.
- * Relation FILTERS are the one exception: `filters[user][id][$eq]=...` below
- * intentionally filters by the related user's numeric `id`, because that's
- * what a users-permissions JWT payload actually contains (`{ id: <number> }`)
- * — users-permissions auth wasn't changed to documentId. See:
- * https://docs.strapi.io/cms/api/rest, https://docs.strapi.io/cms/features/users-permissions
+ * Entitlement-related queries, rebuilt around the unified epaper-entitlement
+ * model (see apps/cms/src/api/epaper-entitlement) — replaces the old
+ * separate Subscription/Purchase content types entirely. `req.userId` here
+ * is an api::epaper-user.epaper-user id (our own identity store, not
+ * plugin::users-permissions), matching what attachUser now sets it to.
  */
 
-/** Fetch a published edition by ISO date (YYYY-MM-DD), with its pages -> image, and each page's published stories. */
+/** A personal (non-org) entitlement covering this date, if any. */
+export async function getPersonalEntitlement(userId, dateIso) {
+  const json = await strapiGet(
+    `/api/epaper-entitlements?filters[user][id][$eq]=${userId}` +
+    `&filters[coverageStart][$lte]=${dateIso}` +
+    `&filters[coverageEnd][$gte]=${dateIso}`
+  );
+  return json.data?.[0] || null;
+}
+
+/** This user's currently-active org seat, if they're a member of one — at
+ * most one active seat per user by convention, so the first match is fine. */
+export async function getActiveOrgSeat(userId) {
+  const json = await strapiGet(
+    `/api/epaper-org-seats?filters[user][id][$eq]=${userId}&filters[active][$eq]=true&populate=organization`
+  );
+  return json.data?.[0] || null;
+}
+
+/** The organization's own entitlement covering this date, if any — what a
+ * seat-holder's access actually resolves through. */
+export async function getOrgEntitlement(organizationId, dateIso) {
+  const json = await strapiGet(
+    `/api/epaper-entitlements?filters[organization][id][$eq]=${organizationId}` +
+    `&filters[coverageStart][$lte]=${dateIso}` +
+    `&filters[coverageEnd][$gte]=${dateIso}`
+  );
+  return json.data?.[0] || null;
+}
+
+/**
+ * Every date RANGE this user can read from — their own personal
+ * entitlements, plus their org's if they're an active seat-holder. This is
+ * the replacement for the old getPurchasedDates() flat-array-of-dates —
+ * that shape doesn't work anymore now that one entitlement can span a
+ * whole subscription period instead of always being exactly one day.
+ * Callers (the archive UI's lock badges) check "is this date within ANY of
+ * these ranges" per date shown, rather than a flat Set membership check.
+ */
+export async function getEntitlementRanges(userId) {
+  const personal = await strapiGet(`/api/epaper-entitlements?filters[user][id][$eq]=${userId}`);
+  const ranges = (personal.data || []).map(e => ({ start: e.coverageStart, end: e.coverageEnd }));
+
+  const seat = await getActiveOrgSeat(userId);
+  if (seat?.organization?.id) {
+    const org = await strapiGet(`/api/epaper-entitlements?filters[organization][id][$eq]=${seat.organization.id}`);
+    ranges.push(...(org.data || []).map(e => ({ start: e.coverageStart, end: e.coverageEnd })));
+  }
+  return ranges;
+}
+
+/** Fetch a published edition by ISO date, with pages -> image and each page's published stories. */
 export async function getEditionByDate(dateIso) {
   const query =
     `/api/editions?filters[date][$eq]=${dateIso}` +
@@ -52,10 +91,10 @@ export async function getEditionByDate(dateIso) {
     `&populate[pages][populate][image]=true` +
     `&populate[pages][populate][stories]=true`;
   const json = await strapiGet(query);
-  return json.data?.[0] || null; // flattened — e.g. edition.date, edition.pages[i].image.url
+  return json.data?.[0] || null;
 }
 
-/** Fetch just enough to stream one page's image bytes, without pulling the whole edition graph. */
+/** Fetch just enough to stream one page's image bytes. */
 export async function getPageImageUrl(dateIso, pageNumber) {
   const query =
     `/api/pages?filters[edition][date][$eq]=${dateIso}` +
@@ -66,58 +105,4 @@ export async function getPageImageUrl(dateIso, pageNumber) {
   const url = page?.image?.url;
   if (!url) return null;
   return url.startsWith('http') ? url : `${config.strapiUrl}${url}`;
-}
-
-/** Active-subscription check for a user, evaluated against currentPeriodEnd (not just the status flag — see schema comment). */
-export async function getActiveSubscription(userId) {
-  const json = await strapiGet(
-    `/api/subscriptions?filters[user][id][$eq]=${userId}&populate=user`
-  );
-  const sub = json.data?.[0];
-  if (!sub) return null;
-  const notExpired = !sub.currentPeriodEnd || new Date(sub.currentPeriodEnd) > new Date();
-  return sub.status === 'active' && notExpired ? sub : null;
-}
-
-/** Has this user completed a purchase for this specific archive date? */
-export async function getCompletedPurchase(userId, dateIso) {
-  const json = await strapiGet(
-    `/api/purchases?filters[user][id][$eq]=${userId}` +
-    `&filters[edition][date][$eq]=${dateIso}` +
-    `&filters[status][$eq]=completed`
-  );
-  return json.data?.[0] || null;
-}
-
-/** All dateIsos this user has purchased — used to render lock badges in the archive UI. */
-export async function getPurchasedDates(userId) {
-  const json = await strapiGet(
-    `/api/purchases?filters[user][id][$eq]=${userId}&filters[status][$eq]=completed&populate[edition][fields][0]=date`
-  );
-  return (json.data || []).map(p => p.edition?.date).filter(Boolean);
-}
-
-export async function createPurchase({ userId, editionDocumentId, amount, currency, provider, providerReference, status }) {
-  return strapiPost('/api/purchases', {
-    data: { user: userId, edition: editionDocumentId, amount, currency, provider, providerReference, status }
-  });
-}
-export async function markPurchaseCompleted(purchaseDocumentId) {
-  return strapiPut(`/api/purchases/${purchaseDocumentId}`, {
-    data: { status: 'completed', completedAt: new Date().toISOString() }
-  });
-}
-export async function upsertActiveSubscription({ userId, provider, providerSubscriptionId, currentPeriodEnd }) {
-  const existing = await strapiGet(`/api/subscriptions?filters[user][id][$eq]=${userId}`);
-  const data = { status: 'active', provider, providerSubscriptionId, currentPeriodEnd };
-  if (existing.data?.[0]) {
-    return strapiPut(`/api/subscriptions/${existing.data[0].documentId}`, { data });
-  }
-  return strapiPost('/api/subscriptions', { data: { user: userId, ...data } });
-}
-
-/** documentId of the edition on this date — the identifier createPurchase() expects for its `edition` relation. */
-export async function getEditionDocumentIdByDate(dateIso) {
-  const json = await strapiGet(`/api/editions?filters[date][$eq]=${dateIso}&fields[0]=date`);
-  return json.data?.[0]?.documentId || null;
 }
