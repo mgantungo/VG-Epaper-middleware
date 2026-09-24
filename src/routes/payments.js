@@ -1,129 +1,98 @@
 import { Router } from 'express';
-import crypto from 'node:crypto';
+import fetch from 'node-fetch';
 import { config } from '../config.js';
 import { todayIso } from '../services/access.js';
-import {
-  createPurchase, markPurchaseCompleted, upsertActiveSubscription, getEditionDocumentIdByDate
-} from '../services/strapiClient.js';
 
 export const paymentsRouter = Router();
 
 /**
  * POST /api/pay/checkout
- * Body: { date: "YYYY-MM-DD" | "today" }
+ * Body: { date: "YYYY-MM-DD" | "today", phoneNumber, paymentmethod }
  *
- * ⚠️ TEMPORARY "ASSUME YES" MODE — no real payment gateway is wired in yet.
- * This grants access IMMEDIATELY, server-side, as if payment had already
- * succeeded — no money moves, no gateway is contacted, no webhook fires.
- * It exists so the rest of the app (paywall -> checkout -> unlock -> read)
- * can be tested and demoed end-to-end before a real gateway is chosen.
+ * Proxies to Strapi's POST /api/epaper-transactions/initialize (built
+ * earlier — see apps/cms/src/api/epaper-transaction). That endpoint is
+ * what actually creates the pending transaction and requests the payment
+ * prompt from the integrator; the middleware's only job here is checking
+ * the reader is signed in and picking the right planKey.
  *
- * TO WIRE IN A REAL GATEWAY LATER: delete the "grant immediately" block
- * below and replace it with a real "create checkout session" call, same as
- * the comment further down in /webhook describes. Nothing else in this
- * app — not the frontend, not /pay/return, not the paywall — needs to
- * change; they were built expecting checkoutUrl to point at your gateway
- * and /webhook to confirm completion, this is just a stand-in for both of
- * those in one place until that's ready.
+ * SCOPED DELIBERATELY: only 'daily' (today) and 'single_archive' (any
+ * other date) — personal purchases only, no organization_new/
+ * organization_topup, no weekly/monthly/quarterly/annual. Those all exist
+ * as real plans in epaper-plan already, but choosing between them needs
+ * picker UI the frontend doesn't have yet. Extending this once that UI
+ * exists means accepting planKey/purchaseKind from the request body
+ * instead of hardcoding them below — the Strapi side already supports it.
+ *
+ * NOTE: unlike the old "assume yes" version, this does NOT grant access
+ * itself and does NOT return an external checkoutUrl to redirect to — the
+ * integrator sends a payment PIN prompt directly to the customer's phone
+ * (see epaper-transaction's callIntegrator()), there's no hosted checkout
+ * page to redirect to. The frontend's PaywallModal.vue still assumes a
+ * redirect-based flow from the earlier placeholder design — that's a real,
+ * separate follow-up: it needs to show "check your phone" and poll for
+ * completion instead, not navigate anywhere.
  */
 paymentsRouter.post('/checkout', async (req, res) => {
   if (!req.userId) return res.status(401).json({ error: 'Sign in required' });
+
   const dateIso = req.body?.date === 'today' ? todayIso() : req.body?.date;
+  const { phoneNumber, paymentmethod } = req.body || {};
   if (!dateIso) return res.status(400).json({ error: 'date is required' });
+  if (!phoneNumber || !paymentmethod) {
+    return res.status(400).json({ error: 'phoneNumber and paymentmethod are required' });
+  }
 
   const isToday = dateIso === todayIso();
-  const amount = isToday ? config.pricing.subscription : config.pricing.archiveEdition;
-  const currency = isToday ? config.pricing.subscriptionCurrency : 'UGX';
+  const planKey = isToday ? 'daily' : 'single_archive';
 
-  let purchaseId = null; // this will hold the Purchase document's `documentId`, not a numeric id
-  if (!isToday) {
-    const editionDocumentId = await getEditionDocumentIdByDate(dateIso);
-    if (!editionDocumentId) return res.status(404).json({ error: 'No edition for that date' });
-    const purchase = await createPurchase({
-      userId: req.userId, editionDocumentId, amount, currency,
-      provider: 'assume-yes', providerReference: null, status: 'pending'
+  try {
+    const strapiRes = await fetch(`${config.strapiUrl}/api/epaper-transactions/initialize`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${config.strapiApiToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        userId: req.userId,
+        phoneNumber,
+        paymentmethod,
+        planKey,
+        purchaseKind: 'personal',
+        customerName: req.userProfile?.displayName || '',
+        customerEmail: req.userProfile?.email || '',
+        customerPhone: phoneNumber,
+        archiveDate: isToday ? undefined : dateIso
+      })
     });
-    purchaseId = purchase.data.documentId; // Strapi 5: mutate/reference documents by documentId, not id
-  }
+    const data = await strapiRes.json();
+    if (!strapiRes.ok) {
+      return res.status(strapiRes.status).json({ error: data?.error || 'Could not start payment' });
+    }
 
-  // --- grant immediately, as if a gateway had just confirmed payment ---
-  if (isToday) {
-    const periodEnd = new Date();
-    periodEnd.setDate(periodEnd.getDate() + 30); // matches the "/ month" pricing shown in the UI
-    await upsertActiveSubscription({
-      userId: req.userId,
-      provider: 'assume-yes',
-      providerSubscriptionId: null,
-      currentPeriodEnd: periodEnd.toISOString()
+    res.json({
+      receiptToken: data.receipt_token,
+      invoiceNumber: data.invoice_number,
+      amount: data.amount,
+      currency: data.currency,
+      status: data.status
     });
-  } else {
-    await markPurchaseCompleted(purchaseId);
+  } catch (err) {
+    console.error('[payments] checkout: could not reach Strapi:', err.message);
+    res.status(502).json({ error: 'Could not reach payment service' });
   }
-  // --- end of the part to delete once a real gateway is wired in ---
-
-  // checkoutUrl points back at this app's own return page instead of an
-  // external gateway, since there's nothing external to redirect to yet.
-  // The frontend (PaywallModal.vue) appends `&returnTo=...` to whatever URL
-  // comes back here — that's meant for a real gateway to know where to send
-  // the reader after ITS hosted checkout page, so it's harmless-but-unused
-  // in this stand-in mode. The `?date=` here is what actually matters: it's
-  // what /pay/return reads to know which edition to poll for, and it polls
-  // successfully almost immediately since access was already granted above.
-  res.json({
-    checkoutUrl: `${config.webOrigin}/pay/return?date=${dateIso}`,
-    purchaseId,
-    amount,
-    currency,
-    kind: isToday ? 'subscription' : 'archive_purchase'
-  });
 });
 
 /**
- * POST /api/pay/webhook
- * Your gateway calls this when a payment completes. Signature verification
- * below is a PLACEHOLDER SCHEME (HMAC-SHA256 over the raw body with a shared
- * secret) — swap it for your actual gateway's documented verification method
- * (most differ in header name and exact signing string). Never trust this
- * endpoint's payload without verifying it; anyone can POST to a public URL.
- *
- * Must be mounted with a raw body parser (see server.js) so the signature can
- * be computed over the exact bytes the gateway signed.
+ * GET /api/pay/status/:receiptToken
+ * Proxies to Strapi's GET /api/epaper-transactions/status/:token — lets the
+ * frontend poll while the customer approves the PIN prompt on their phone.
  */
-paymentsRouter.post('/webhook', async (req, res) => {
-  const signature = req.headers['x-webhook-signature']; // placeholder header name — check your gateway's docs
-  const expected = crypto
-    .createHmac('sha256', config.paymentWebhookSecret || '')
-    .update(req.body) // raw Buffer, from express.raw()
-    .digest('hex');
-
-  if (!signature || !timingSafeEqual(signature, expected)) {
-    return res.status(401).json({ error: 'invalid signature' });
-  }
-
-  const event = JSON.parse(req.body.toString('utf8'));
-  // TODO: map this to your gateway's actual event shape. This assumes
-  // something like { type: 'payment.completed', reference, kind, userId, subscription: {...} }.
-  if (event.type !== 'payment.completed') {
-    return res.status(200).json({ ignored: true });
-  }
-
-  if (event.kind === 'archive_purchase' && event.purchaseId) {
-    await markPurchaseCompleted(event.purchaseId);
-  } else if (event.kind === 'subscription' && event.userId) {
-    await upsertActiveSubscription({
-      userId: event.userId,
-      provider: event.provider || 'your-gateway',
-      providerSubscriptionId: event.providerSubscriptionId,
-      currentPeriodEnd: event.currentPeriodEnd // your gateway should tell you this
+paymentsRouter.get('/status/:receiptToken', async (req, res) => {
+  try {
+    const strapiRes = await fetch(`${config.strapiUrl}/api/epaper-transactions/status/${req.params.receiptToken}`, {
+      headers: { Authorization: `Bearer ${config.strapiApiToken}` }
     });
+    const data = await strapiRes.json();
+    res.status(strapiRes.status).json(data);
+  } catch (err) {
+    console.error('[payments] status: could not reach Strapi:', err.message);
+    res.status(502).json({ error: 'Could not reach payment service' });
   }
-
-  res.status(200).json({ received: true });
 });
-
-function timingSafeEqual(a, b) {
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
-  if (bufA.length !== bufB.length) return false;
-  return crypto.timingSafeEqual(bufA, bufB);
-}
