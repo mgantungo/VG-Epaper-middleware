@@ -8,41 +8,47 @@ export const paymentsRouter = Router();
 /**
  * POST /api/pay/checkout
  * Body: { date: "YYYY-MM-DD" | "today", phoneNumber, paymentmethod }
+ *    OR { dates: ["YYYY-MM-DD", ...], phoneNumber, paymentmethod }
  *
- * Proxies to Strapi's POST /api/epaper-transactions/initialize (built
- * earlier — see apps/cms/src/api/epaper-transaction). That endpoint is
- * what actually creates the pending transaction and requests the payment
- * prompt from the integrator; the middleware's only job here is checking
- * the reader is signed in and picking the right planKey.
+ * Proxies to Strapi's POST /api/epaper-transactions/initialize. `dates`
+ * (plural) is the "buy any number of archives in one purchase" shape —
+ * every entry becomes its own entitlement once payment succeeds (see
+ * epaper-transaction's grantEntitlement()), priced as
+ * single_archive.price × number of dates. `date` (singular) still works
+ * exactly as before — "today" maps to the daily plan, any other single
+ * date maps to a one-element archive purchase. Only one of date/dates
+ * should be sent; dates wins if both are present.
  *
- * SCOPED DELIBERATELY: only 'daily' (today) and 'single_archive' (any
- * other date) — personal purchases only, no organization_new/
- * organization_topup, no weekly/monthly/quarterly/annual. Those all exist
- * as real plans in epaper-plan already, but choosing between them needs
- * picker UI the frontend doesn't have yet. Extending this once that UI
- * exists means accepting planKey/purchaseKind from the request body
- * instead of hardcoding them below — the Strapi side already supports it.
+ * SCOPED DELIBERATELY: personal purchases only, no organization_new/
+ * organization_topup — those exist as real options in epaper-plan
+ * already, but choosing between them needs picker UI the frontend
+ * doesn't have yet.
  *
  * NOTE: unlike the old "assume yes" version, this does NOT grant access
  * itself and does NOT return an external checkoutUrl to redirect to — the
- * integrator sends a payment PIN prompt directly to the customer's phone
- * (see epaper-transaction's callIntegrator()), there's no hosted checkout
- * page to redirect to. The frontend's PaywallModal.vue still assumes a
- * redirect-based flow from the earlier placeholder design — that's a real,
- * separate follow-up: it needs to show "check your phone" and poll for
- * completion instead, not navigate anywhere.
+ * integrator sends a payment PIN prompt directly to the customer's phone,
+ * there's no hosted checkout page to redirect to.
  */
 paymentsRouter.post('/checkout', async (req, res) => {
   if (!req.userId) return res.status(401).json({ error: 'Sign in required' });
 
-  const dateIso = req.body?.date === 'today' ? todayIso() : req.body?.date;
   const { phoneNumber, paymentmethod } = req.body || {};
-  if (!dateIso) return res.status(400).json({ error: 'date is required' });
   if (!phoneNumber || !paymentmethod) {
     return res.status(400).json({ error: 'phoneNumber and paymentmethod are required' });
   }
 
-  const isToday = dateIso === todayIso();
+  const rawDates = Array.isArray(req.body?.dates) ? req.body.dates : null;
+  const singleDateIso = req.body?.date === 'today' ? todayIso() : req.body?.date;
+
+  if (!rawDates && !singleDateIso) {
+    return res.status(400).json({ error: 'date or dates is required' });
+  }
+
+  // A multi-date request is always an archive purchase — "today" isn't an
+  // archive date yet, so it doesn't belong mixed into this shape; it goes
+  // through the singular `date: 'today'` path below instead.
+  const isMultiArchive = Boolean(rawDates && rawDates.length);
+  const isToday = !isMultiArchive && singleDateIso === todayIso();
   const planKey = isToday ? 'daily' : 'single_archive';
 
   try {
@@ -58,7 +64,9 @@ paymentsRouter.post('/checkout', async (req, res) => {
         customerName: req.userProfile?.displayName || '',
         customerEmail: req.userProfile?.email || '',
         customerPhone: phoneNumber,
-        archiveDate: isToday ? undefined : dateIso
+        ...(isMultiArchive
+          ? { archiveDates: rawDates }
+          : { archiveDate: isToday ? undefined : singleDateIso })
       })
     });
     const data = await strapiRes.json();
@@ -71,7 +79,8 @@ paymentsRouter.post('/checkout', async (req, res) => {
       invoiceNumber: data.invoice_number,
       amount: data.amount,
       currency: data.currency,
-      status: data.status
+      status: data.status,
+      archiveDatesCount: data.archiveDatesCount
     });
   } catch (err) {
     console.error('[payments] checkout: could not reach Strapi:', err.message);
