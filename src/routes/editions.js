@@ -31,7 +31,11 @@ function priceFor(dateIso, edition) {
  *
  * Response shapes below read Strapi 5's flattened fields directly (e.g.
  * `edition.pages[i].image.url`) — there is no `.attributes` wrapper to dig
- * through, unlike Strapi 4.
+ * through, unlike Strapi 4. `section`/`sku`/`editionSku` are plain scalar
+ * fields, not relations — Strapi returns them automatically without
+ * needing an explicit populate, so strapiClient.js's existing query didn't
+ * need changing to start receiving them; this file just wasn't forwarding
+ * all of them into the response shape actually sent to the frontend.
  */
 editionsRouter.get('/:date', async (req, res) => {
   const dateIso = req.params.date === 'today' ? todayIso() : req.params.date;
@@ -53,6 +57,8 @@ editionsRouter.get('/:date', async (req, res) => {
     return res.json({
       date: dateIso,
       locked: true,
+      sku: edition.sku,
+      publicationCode: edition.publicationCode,
       pageCount: edition.pageCount,
       price: priceFor(dateIso, edition),
       pages: basePages // page numbers/sections only — no image URLs, no story text
@@ -62,23 +68,33 @@ editionsRouter.get('/:date', async (req, res) => {
   const pages = sortedPages.map(p => ({
     pageNumber: p.pageNumber,
     section: p.section,
+    editionSku: p.editionSku,
     // Signed/short-lived URLs in production — see the README note on
     // fronting this with a real CDN instead of proxying through Node.
     imageUrl: `/api/editions/${dateIso}/pages/${p.pageNumber}.jpg`,
     stories: (p.stories || []).map(s => ({
       id: s.documentId,
+      editionSku: s.editionSku,
       top: s.top, left: s.left, width: s.width, height: s.height,
       kicker: s.kicker,
       headline: s.headline,
       byline: s.byline,
       teaser: s.teaser,
-      body: s.body
+      body: s.body,
+      // Only ever set when the ingest engine found an explicit jump-line
+      // marker in the text ("Turned to Page N" / "Continued from Page N")
+      // — null otherwise, never guessed from layout alone. See
+      // apps/ingest/src/pipeline/extractSections.js's own comments.
+      continuesToPage: s.continuesToPage ?? null,
+      continuesFromPage: s.continuesFromPage ?? null
     }))
   }));
 
   res.json({
     date: dateIso,
     locked: false,
+    sku: edition.sku,
+    publicationCode: edition.publicationCode,
     volume: edition.volume,
     issueNumber: edition.issueNumber,
     coverPrice: edition.coverPrice,
