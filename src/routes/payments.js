@@ -105,3 +105,48 @@ paymentsRouter.get('/status/:receiptToken', async (req, res) => {
     res.status(502).json({ error: 'Could not reach payment service' });
   }
 });
+
+/**
+ * POST /api/pay/callback
+ *
+ * A thin proxy — the actual callback logic lives entirely in Strapi's
+ * epaper-transaction controller (verifying the shared secret, updating
+ * aggregator_status, granting the entitlement on success). This exists
+ * purely because Strapi has never been exposed to the public internet
+ * anywhere in this project — everything public-facing goes through the
+ * middleware, Strapi stays reachable only internally via
+ * config.strapiApiToken — and the payment integrator, an external
+ * third-party service, needs a PUBLIC url to call back to. Rather than
+ * carve out a one-off exception and expose Strapi directly for just this
+ * endpoint, this route gives the integrator a public URL that forwards
+ * straight through to Strapi's real one internally.
+ *
+ * PAYMENT_CALLBACK_URL in apps/cms/.env (NOT this service's .env — that
+ * warning about it being unset comes from the CMS's own controller code)
+ * needs to be set to THIS route's public URL
+ * (https://<this-service's-public-domain>/api/pay/callback), not
+ * Strapi's own address directly.
+ *
+ * Forwards the x-callback-secret header if present, since Strapi's own
+ * callback action checks it — the integrator will have been configured
+ * to send that header to whatever URL it's given (now this one), so it
+ * has to be relayed through, not dropped, or Strapi's own verification
+ * would see it missing.
+ */
+paymentsRouter.post('/callback', async (req, res) => {
+  try {
+    const strapiRes = await fetch(`${config.strapiUrl}/api/epaper-transactions/callback`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(req.headers['x-callback-secret'] ? { 'x-callback-secret': req.headers['x-callback-secret'] } : {})
+      },
+      body: JSON.stringify(req.body)
+    });
+    const data = await strapiRes.json().catch(() => ({}));
+    res.status(strapiRes.status).json(data);
+  } catch (err) {
+    console.error('[payments] callback proxy: could not reach Strapi:', err.message);
+    res.status(502).json({ error: 'Could not reach payment service' });
+  }
+});
