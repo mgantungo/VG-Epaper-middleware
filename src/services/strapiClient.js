@@ -83,6 +83,21 @@ export async function getEntitlementRanges(userId) {
   return ranges;
 }
 
+/** A single active plan's real data by key — replaces the static
+ * config.pricing values editions.js's priceFor() used to read, so a price
+ * change in Strapi admin actually reaches the locked-preview response
+ * without a code change. Returns null on any failure (not found, Strapi
+ * unreachable) — priceFor() falls back to the old static value in that
+ * case rather than breaking the edition response over a pricing lookup. */
+export async function getPlanByKey(key) {
+  try {
+    const json = await strapiGet(`/api/epaper-plans?filters[key][$eq]=${key}&filters[active][$eq]=true`);
+    return json.data?.[0] || null;
+  } catch {
+    return null;
+  }
+}
+
 /** Fetch a published edition by ISO date, with pages -> image and each page's published stories. */
 export async function getEditionByDate(dateIso) {
   const query =

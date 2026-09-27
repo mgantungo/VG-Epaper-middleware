@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import fetch from 'node-fetch';
 import { config } from '../config.js';
-import { getEditionByDate, getPageImageUrl, getEntitlementRanges } from '../services/strapiClient.js';
+import { getEditionByDate, getPageImageUrl, getEntitlementRanges, getPlanByKey } from '../services/strapiClient.js';
 import { hasAccess, todayIso } from '../services/access.js';
 
 export const editionsRouter = Router();
@@ -11,12 +11,34 @@ export const editionsRouter = Router();
 // displayed price to real Plan records belongs with the /checkout rebuild
 // (the next item in the series), not this entitlement-checking one. This
 // will need to change then, not forgotten, just sequenced.
-function priceFor(dateIso, edition) {
-  if (dateIso === todayIso()) {
-    return { amount: config.pricing.subscription, currency: config.pricing.subscriptionCurrency, kind: 'subscription' };
+/**
+ * Real price from the epaper-plan collection now — replaces the old
+ * static config.pricing.subscription/archiveEdition values, which never
+ * reflected a price change made in Strapi admin. Falls back to those same
+ * static values only if the plan lookup fails for some reason (Strapi
+ * unreachable, plan not found) — a locked preview should still show SOME
+ * reasonable price rather than break entirely over a pricing lookup.
+ * Per-edition archivePriceOverride still wins over the plan's own price
+ * when set, unchanged from before.
+ */
+async function priceFor(dateIso, edition) {
+  const isToday = dateIso === todayIso();
+  const planKey = isToday ? 'daily' : 'single_archive';
+  const plan = await getPlanByKey(planKey);
+
+  if (isToday) {
+    return {
+      amount: plan?.price ?? config.pricing.subscription,
+      currency: plan?.currency ?? config.pricing.subscriptionCurrency,
+      kind: 'subscription'
+    };
   }
   const override = edition?.archivePriceOverride;
-  return { amount: override ?? config.pricing.archiveEdition, currency: 'UGX', kind: 'archive_purchase' };
+  return {
+    amount: override ?? plan?.price ?? config.pricing.archiveEdition,
+    currency: plan?.currency ?? 'UGX',
+    kind: 'archive_purchase'
+  };
 }
 
 /**
@@ -60,7 +82,7 @@ editionsRouter.get('/:date', async (req, res) => {
       sku: edition.sku,
       publicationCode: edition.publicationCode,
       pageCount: edition.pageCount,
-      price: priceFor(dateIso, edition),
+      price: await priceFor(dateIso, edition),
       pages: basePages // page numbers/sections only — no image URLs, no story text
     });
   }

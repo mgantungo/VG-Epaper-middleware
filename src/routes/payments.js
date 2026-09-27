@@ -6,6 +6,46 @@ import { todayIso } from '../services/access.js';
 export const paymentsRouter = Router();
 
 /**
+ * GET /api/pay/plans
+ * Real plan data — key, label, price, currency, kind, durationDays — from
+ * Strapi's epaper-plan collection, replacing the hardcoded
+ * config.pricing.subscription/archiveEdition values editions.js's
+ * priceFor() has been using. The paywall's plan picker calls this to
+ * render its radio options with real, currently-configured prices;
+ * changing a price in Strapi admin now actually reaches the UI without
+ * any code change, which config.pricing values never could.
+ * Requires the Public role's `find` permission enabled for epaper-plan in
+ * Strapi (Settings -> Users & Permissions -> Roles -> Public ->
+ * epaper-plan -> find) — read-only, no write permissions needed or
+ * recommended there.
+ */
+paymentsRouter.get('/plans', async (req, res) => {
+  try {
+    const strapiRes = await fetch(
+      `${config.strapiUrl}/api/epaper-plans?filters[active][$eq]=true&sort=sortOrder:asc&pagination[pageSize]=100`,
+      { headers: { Authorization: `Bearer ${config.strapiApiToken}` } }
+    );
+    if (!strapiRes.ok) {
+      return res.status(strapiRes.status).json({ error: 'Could not load plans' });
+    }
+    const json = await strapiRes.json();
+    const plans = (json.data || []).map(p => ({
+      key: p.key,
+      label: p.label,
+      kind: p.kind,
+      durationDays: p.durationDays,
+      price: p.price,
+      currency: p.currency,
+      allowsOrgPurchase: p.allowsOrgPurchase
+    }));
+    res.json({ plans });
+  } catch (err) {
+    console.error('[payments] plans: could not reach Strapi:', err.message);
+    res.status(502).json({ error: 'Could not reach payment service' });
+  }
+});
+
+/**
  * POST /api/pay/checkout
  * Body: { date: "YYYY-MM-DD" | "today", phoneNumber, paymentmethod }
  *    OR { dates: ["YYYY-MM-DD", ...], phoneNumber, paymentmethod }
@@ -49,7 +89,13 @@ paymentsRouter.post('/checkout', async (req, res) => {
   // through the singular `date: 'today'` path below instead.
   const isMultiArchive = Boolean(rawDates && rawDates.length);
   const isToday = !isMultiArchive && singleDateIso === todayIso();
-  const planKey = isToday ? 'daily' : 'single_archive';
+
+  // planKey is now explicit from the plan picker (radio selection) rather
+  // than always auto-derived from the date — the whole point of letting
+  // someone choose weekly/monthly/etc. instead of just paying for today.
+  // Still falls back to the old auto-derivation when the caller doesn't
+  // send one, so nothing that predates the plan picker breaks.
+  const planKey = req.body?.planKey || (isToday ? 'daily' : 'single_archive');
 
   try {
     const strapiRes = await fetch(`${config.strapiUrl}/api/epaper-transactions/initialize`, {
