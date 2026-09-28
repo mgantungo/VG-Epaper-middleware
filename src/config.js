@@ -10,6 +10,13 @@ export const config = {
   // why access and refresh shouldn't share one).
   jwtAccessSecret: process.env.JWT_ACCESS_SECRET,
   jwtRefreshSecret: process.env.JWT_REFRESH_SECRET,
+  // Separate secret for handle.epapers admin sessions — must match
+  // apps/cms's own HANDLE_ADMIN_JWT_SECRET exactly (that's what actually
+  // signs the token; this only verifies it). Deliberately not shared
+  // with jwtAccessSecret/jwtRefreshSecret above — those are the reader-
+  // facing epaper-user identity system, completely separate from
+  // handle-admin.
+  handleAdminJwtSecret: process.env.HANDLE_ADMIN_JWT_SECRET,
   webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3871',
   paymentWebhookSecret: process.env.PAYMENT_WEBHOOK_SECRET,
   pricing: {
