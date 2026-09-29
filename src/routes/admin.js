@@ -145,10 +145,14 @@ adminRouter.post('/editions', requireHandleAdmin, upload.single('sourcePdf'), as
 adminRouter.get('/editions/:id', requireHandleAdmin, async (req, res) => {
   try {
     const strapiRes = await fetch(
-      `${config.strapiUrl}/api/editions/${req.params.id}?status=draft` +
+      `${config.strapiUrl}/api/editions/${encodeURIComponent(req.params.id)}?status=draft` +
       `&populate[pages][populate][image]=true&populate[pages][populate][stories]=true&populate[sourcePdf]=true`,
       { headers: strapiHeaders() }
     );
+    if (!strapiRes.ok) {
+      console.error('[admin] edition detail: CMS returned', strapiRes.status);
+      return res.status(strapiRes.status === 404 ? 404 : 502).json({ error: `CMS returned ${strapiRes.status}` });
+    }
     const result = await strapiRes.json();
     const edition = result.data;
     if (!edition) return res.status(404).json({ error: 'Edition not found' });
@@ -167,22 +171,26 @@ adminRouter.get('/editions/:id', requireHandleAdmin, async (req, res) => {
         pageCount: edition.pageCount,
         pipelineStatus: edition.pipelineStatus,
         pipelineError: edition.pipelineError,
-        sourcePdfUrl: edition.sourcePdf?.url || null
+        sourcePdfUrl: edition.sourcePdf?.url || null,
+        createdAt: edition.createdAt,
+        updatedAt: edition.updatedAt,
+        publishedAt: edition.publishedAt
       },
-      pages: pages.map(p => ({
-        pageNumber: p.pageNumber,
-        section: p.section,
-        imageUrl: p.image?.url || null,
-        storyCount: p.stories?.length || 0,
-        stories: (p.stories || []).map(s => ({
-          documentId: s.documentId,
-          headline: s.headline,
-          byline: s.byline,
-          source: s.source,
-          detectionConfidence: s.detectionConfidence,
-          top: s.top, left: s.left, width: s.width, height: s.height
-        }))
-      })),
+      pages: pages.map(p => {
+        const { image, stories, ...pageFields } = p;
+        return {
+          ...pageFields,
+          imageUrl: image?.url || null,
+          imageWidth: image?.width || null,
+          imageHeight: image?.height || null,
+          storyCount: stories?.length || 0,
+          // Every field on the story, not a hand-picked subset, sorted
+          // top-to-bottom then left-to-right so numbering follows the page.
+          stories: [...(stories || [])].sort(
+            (a, b) => (a.top ?? 0) - (b.top ?? 0) || (a.left ?? 0) - (b.left ?? 0)
+          )
+        };
+      }),
       summary: {
         pageCount: pages.length,
         storyCount: totalStories,
@@ -192,5 +200,50 @@ adminRouter.get('/editions/:id', requireHandleAdmin, async (req, res) => {
   } catch (err) {
     console.error('[admin] edition detail failed:', err.message);
     res.status(502).json({ error: 'Could not reach CMS' });
+  }
+});
+
+/**
+ * GET /editions/:id/pages/:pageNumber/image
+ * Streams one page image for the handle app's <img> tags (via its own
+ * same-origin proxy route, which forwards the session as a Bearer token).
+ */
+adminRouter.get('/editions/:id/pages/:pageNumber/image', requireHandleAdmin, async (req, res) => {
+  const pageNumber = Number(req.params.pageNumber);
+  if (!Number.isInteger(pageNumber) || pageNumber < 1) {
+    return res.status(400).json({ error: 'Invalid page number' });
+  }
+
+  try {
+    const strapiRes = await fetch(
+      `${config.strapiUrl}/api/editions/${encodeURIComponent(req.params.id)}?status=draft` +
+      `&populate[pages][fields][0]=pageNumber&populate[pages][populate][image]=true`,
+      { headers: strapiHeaders() }
+    );
+    if (!strapiRes.ok) {
+      console.error('[admin] page image: CMS returned', strapiRes.status);
+      return res.status(strapiRes.status === 404 ? 404 : 502).json({ error: `CMS returned ${strapiRes.status}` });
+    }
+
+    const result = await strapiRes.json();
+    const page = (result.data?.pages || []).find(p => Number(p.pageNumber) === pageNumber);
+    const imageUrl = page?.image?.url;
+    if (!imageUrl) return res.status(404).json({ error: `Page ${pageNumber} has no image` });
+
+    const fullUrl = /^https?:\/\//.test(imageUrl) ? imageUrl : `${config.strapiUrl}${imageUrl}`;
+    const imageRes = await fetch(fullUrl);
+    if (!imageRes.ok) {
+      console.error('[admin] page image: fetch', fullUrl, 'returned', imageRes.status);
+      return res.status(502).json({ error: `Image fetch returned ${imageRes.status}` });
+    }
+
+    const buf = Buffer.from(await imageRes.arrayBuffer());
+    res.set('Content-Type', imageRes.headers.get('content-type') || 'image/jpeg');
+    res.set('Content-Length', String(buf.length));
+    res.set('Cache-Control', 'private, max-age=3600');
+    res.send(buf);
+  } catch (err) {
+    console.error('[admin] page image proxy failed:', err.message);
+    res.status(502).json({ error: 'Could not load page image' });
   }
 });
