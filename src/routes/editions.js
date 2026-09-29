@@ -1,3 +1,11 @@
+/**
+ * File:      /var/www/VGEpaper/apps/middleware/src/routes/editions.js
+ * Repo path: apps/middleware/src/routes/editions.js
+ * System:    apps/middleware (Express, port 4161)          MODIFIED
+ *
+ * Change: readers only receive active stories (reviewState empty or
+ * 'active'); stories dropped or awaiting drop in the handle editor are hidden.
+ */
 import { Router } from 'express';
 import fetch from 'node-fetch';
 import { config } from '../config.js';
@@ -5,6 +13,9 @@ import { getEditionByDate, getPageImageUrl, getEntitlementRanges, getPlanByKey }
 import { hasAccess, todayIso } from '../services/access.js';
 
 export const editionsRouter = Router();
+
+// Stories created before reviewState existed have it empty: those count as active.
+const isReaderVisible = s => !s.reviewState || s.reviewState === 'active';
 
 // NOTE: still reading static config.pricing here, not epaper-plan's actual
 // price — deliberately left as-is for this pass, since wiring the paywall's
@@ -94,7 +105,7 @@ editionsRouter.get('/:date', async (req, res) => {
     // Signed/short-lived URLs in production — see the README note on
     // fronting this with a real CDN instead of proxying through Node.
     imageUrl: `/api/editions/${dateIso}/pages/${p.pageNumber}.jpg`,
-    stories: (p.stories || []).map(s => ({
+    stories: (p.stories || []).filter(isReaderVisible).map(s => ({
       id: s.documentId,
       editionSku: s.editionSku,
       top: s.top, left: s.left, width: s.width, height: s.height,

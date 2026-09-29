@@ -1,3 +1,10 @@
+/**
+ * File:      /var/www/VGEpaper/apps/middleware/src/server.js
+ * Repo path: apps/middleware/src/server.js
+ * System:    apps/middleware (Express, port 4161)          MODIFIED
+ *
+ * Change: mounts routes/adminStories.js (story editor) under /api/admin.
+ */
 import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
@@ -8,6 +15,7 @@ import { paymentsRouter } from './routes/payments.js';
 import { accountRouter } from './routes/account.js';
 import { authRouter } from './routes/auth.js';
 import { adminRouter } from './routes/admin.js';
+import { adminStoriesRouter } from './routes/adminStories.js';
 
 const app = express();
 
@@ -37,6 +45,8 @@ app.use('/api/auth', authRouter);
 // directly. Server-to-server requests aren't subject to CORS at all —
 // no change needed to the cors() config above for this to work.
 app.use('/api/admin', adminRouter);
+// Story editor: /api/admin/editor/* -> apps/ingest (see routes/adminStories.js).
+app.use('/api/admin', adminStoriesRouter);
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 

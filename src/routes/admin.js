@@ -1,3 +1,12 @@
+/**
+ * File:      /var/www/VGEpaper/apps/middleware/src/routes/admin.js
+ * Repo path: apps/middleware/src/routes/admin.js
+ * System:    apps/middleware (Express, port 4161)          MODIFIED
+ *
+ * Change (edition detail): dropped stories are left out of pages and
+ * counts; each page carries extractionStatus plus unassignedWords instead
+ * of the full extractionLedger (kept out to keep a 60+ page response small).
+ */
 import { Router } from 'express';
 import multer from 'multer';
 import jwt from 'jsonwebtoken';
@@ -157,7 +166,10 @@ adminRouter.get('/editions/:id', requireHandleAdmin, async (req, res) => {
     const edition = result.data;
     if (!edition) return res.status(404).json({ error: 'Edition not found' });
 
-    const pages = [...(edition.pages || [])].sort((a, b) => a.pageNumber - b.pageNumber);
+    const notDropped = s => s.reviewState !== 'dropped';
+    const pages = [...(edition.pages || [])]
+      .sort((a, b) => a.pageNumber - b.pageNumber)
+      .map(p => ({ ...p, stories: (p.stories || []).filter(notDropped) }));
     const totalStories = pages.reduce((sum, p) => sum + (p.stories?.length || 0), 0);
 
     res.json({
@@ -177,9 +189,10 @@ adminRouter.get('/editions/:id', requireHandleAdmin, async (req, res) => {
         publishedAt: edition.publishedAt
       },
       pages: pages.map(p => {
-        const { image, stories, ...pageFields } = p;
+        const { image, stories, extractionLedger, ...pageFields } = p;
         return {
           ...pageFields,
+          unassignedWords: extractionLedger?.buckets?.unassigned ?? null,
           imageUrl: image?.url || null,
           imageWidth: image?.width || null,
           imageHeight: image?.height || null,
@@ -194,7 +207,8 @@ adminRouter.get('/editions/:id', requireHandleAdmin, async (req, res) => {
       summary: {
         pageCount: pages.length,
         storyCount: totalStories,
-        pagesWithNoStories: pages.filter(p => (p.stories?.length || 0) === 0).length
+        pagesWithNoStories: pages.filter(p => (p.stories?.length || 0) === 0).length,
+        pagesNeedingReview: pages.filter(p => p.extractionStatus === 'needs_review').length
       }
     });
   } catch (err) {
