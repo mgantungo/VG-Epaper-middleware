@@ -49,6 +49,13 @@ function forward(method) {
         body: method === 'GET' ? undefined : JSON.stringify(req.body || {})
       });
       const text = await upstream.text();
+      // Our ingest routes always answer JSON. Anything else (Express's HTML
+      // "Cannot GET ...") means the route isn't there: old ingest code still
+      // running, or INGEST_URL pointing at the wrong service.
+      if (!(upstream.headers.get('content-type') || '').includes('application/json')) {
+        console.error(`[adminStories] ingest ${upstream.status} non-JSON for ${method} ${ingestUrl}${req.originalUrl.replace(/^\/api\/admin/, '')}`);
+        return res.status(502).json({ error: `Ingest service has no story editor route (HTTP ${upstream.status}). Restart ingest with the new server.js and check INGEST_URL.` });
+      }
       res.status(upstream.status).type('application/json').send(text || '{}');
     } catch (err) {
       console.error('[adminStories] ingest unreachable:', err.message);
