@@ -29,14 +29,20 @@
  *   GET    /api/admin/organisations/:id/members             ?search&status&role&page&pageSize
  *   POST   /api/admin/organisations/:id/members/:seatId/status  { status: active|suspended, reason }
  *   GET    /api/admin/organisations/:id/audit               ?page&pageSize
+ *   GET    /api/admin/organisations/:id/import/template     .xlsx members spreadsheet (pre-filled / guided)
+ *   POST   /api/admin/organisations/:id/import/preview      multipart: file, defaults (JSON string, optional)
+ *   POST   /api/admin/organisations/:id/import/:importId/commit
+ *   (UPDATED: the spreadsheet round-trip, same rules as the Org Admin's own upload)
  *
  * Env: ORG_FEATURE_ENABLED=true to switch these on (404 otherwise).
  */
 import express, { Router } from 'express';
+import multer from 'multer';
 import fetch from 'node-fetch';
 import { config } from '../config.js';
 import { requireHandleAdmin, requireHandleRight, fetchHandleRights } from '../middleware/handleRights.js';
 import { invalidateOrgAccessCache } from '../services/strapiClient.js';
+import { parseMemberSheet, buildTemplate, templateFilename, SheetError } from '../services/memberSheet.js';
 
 export const adminOrgsRouter = Router();
 
@@ -47,7 +53,7 @@ adminOrgsRouter.use((req, res, next) => {
 adminOrgsRouter.use(express.json({ limit: '100kb' })); // no-op if server.js already parsed the body
 
 // Reject non-numeric ids before they reach Strapi.
-for (const p of ['id', 'cid', 'seatId']) {
+for (const p of ['id', 'cid', 'seatId', 'importId']) {
   adminOrgsRouter.param(p, (req, res, next, value) => {
     if (!/^\d+$/.test(value)) return res.status(400).json({ error: `Invalid ${p}` });
     next();
@@ -119,3 +125,65 @@ adminOrgsRouter.get('/:id/members', guard, forward('GET', r => `/orgs/${r.params
 adminOrgsRouter.post('/:id/members/:seatId/status', guard, forward('POST', r => `/orgs/${r.params.id}/members/${r.params.seatId}/status`));
 
 adminOrgsRouter.get('/:id/audit', guard, forward('GET', r => `/orgs/${r.params.id}/audit`));
+
+// ---- members spreadsheet (download, upload, apply) -------------------------
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024, files: 1 } });
+
+async function strapiJson(req, method, path, body) {
+  const upstream = await fetch(`${config.strapiUrl}/api/org-management${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${config.strapiApiToken}`,
+      'content-type': 'application/json',
+      'x-actor-admin-id': String(req.handleAdmin.sub)
+    },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
+  return { status: upstream.status, ok: upstream.ok, data: await upstream.json().catch(() => null) };
+}
+
+adminOrgsRouter.get('/:id/import/template', guard, async (req, res) => {
+  try {
+    const r = await strapiJson(req, 'GET', `/orgs/${req.params.id}/members/export`);
+    if (!r.ok) return res.status(r.status || 502).json(r.data || { error: 'Could not load members' });
+    const buf = await buildTemplate(r.data);
+    res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.set('Content-Disposition', `attachment; filename="${templateFilename(r.data?.organisation?.name)}"`);
+    res.send(buf);
+  } catch (err) {
+    console.error('[adminOrgs] members spreadsheet failed:', err.message);
+    res.status(500).json({ error: 'Could not build the spreadsheet' });
+  }
+});
+
+adminOrgsRouter.post('/:id/import/preview', guard, (req, res, next) => {
+  upload.single('file')(req, res, (err) => {
+    if (!err) return next();
+    res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'The file is larger than 2 MB' : 'Upload failed' });
+  });
+}, async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Choose a .xlsx or .csv file to upload' });
+  let defaults = {};
+  if (req.body?.defaults) {
+    try { defaults = JSON.parse(req.body.defaults); } catch { return res.status(400).json({ error: 'Invalid default period' }); }
+  }
+  let rows;
+  try {
+    rows = await parseMemberSheet(req.file.buffer, req.file.originalname || '');
+  } catch (err) {
+    if (err instanceof SheetError) return res.status(400).json({ error: err.message });
+    console.error('[adminOrgs] sheet parse failed:', err);
+    return res.status(400).json({ error: 'The file could not be read' });
+  }
+  try {
+    const r = await strapiJson(req, 'POST', `/orgs/${req.params.id}/imports`, { filename: req.file.originalname, rows, defaults });
+    if (!r.data) return res.status(502).json({ error: 'Organisation service returned an unexpected response' });
+    res.status(r.status).json(r.data);
+  } catch (err) {
+    console.error('[adminOrgs] import preview: could not reach Strapi:', err.message);
+    res.status(502).json({ error: 'Could not reach CMS' });
+  }
+});
+
+adminOrgsRouter.post('/:id/import/:importId/commit', guard, forward('POST', r => `/orgs/${r.params.id}/imports/${r.params.importId}/commit`));

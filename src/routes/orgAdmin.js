@@ -17,7 +17,8 @@
  *   POST /api/org-admin/members/:seatId/role       { role: member|admin }
  *   POST /api/org-admin/members/:seatId/remove     { reason? }
  *   POST /api/org-admin/members/:seatId/resend-invite
- *   GET  /api/org-admin/import/template            .xlsx download
+ *   GET  /api/org-admin/import/template            .xlsx: the members spreadsheet (current members
+ *                                                  pre-filled; guided empty sheet if none yet)
  *   POST /api/org-admin/import/preview             multipart: file (.xlsx/.csv), defaults (JSON string, optional)
  *   POST /api/org-admin/import/:importId/commit
  *   GET  /api/org-admin/audit                      ?page&pageSize
@@ -31,7 +32,7 @@ import fetch from 'node-fetch';
 import { config } from '../config.js';
 import { requireUser } from '../middleware/auth.js';
 import { invalidateOrgAccessCache } from '../services/strapiClient.js';
-import { parseMemberSheet, buildTemplate, SheetError } from '../services/memberSheet.js';
+import { parseMemberSheet, buildTemplate, templateFilename, SheetError } from '../services/memberSheet.js';
 
 export const orgAdminRouter = Router();
 
@@ -93,15 +94,17 @@ orgAdminRouter.post('/members/:seatId/remove', forward('POST', (r) => `/members/
 orgAdminRouter.post('/members/:seatId/resend-invite', forward('POST', (r) => `/members/${r.params.seatId}/resend-invite`));
 orgAdminRouter.get('/audit', forward('GET', '/audit'));
 
-orgAdminRouter.get('/import/template', async (_req, res) => {
+orgAdminRouter.get('/import/template', async (req, res) => {
   try {
-    const buf = await buildTemplate();
+    const r = await callStrapi(req, 'GET', '/members/export');
+    if (!r.ok) return res.status(r.status || 502).json(r.data || { error: 'Could not load your members' });
+    const buf = await buildTemplate(r.data);
     res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.set('Content-Disposition', 'attachment; filename="epaper-members-template.xlsx"');
+    res.set('Content-Disposition', `attachment; filename="${templateFilename(r.data?.organisation?.name)}"`);
     res.send(buf);
   } catch (err) {
-    console.error('[orgAdmin] template build failed:', err.message);
-    res.status(500).json({ error: 'Could not build the template' });
+    console.error('[orgAdmin] members spreadsheet failed:', err.message);
+    res.status(500).json({ error: 'Could not build the spreadsheet' });
   }
 });
 
