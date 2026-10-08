@@ -1,4 +1,11 @@
-import { getPersonalEntitlement, getActiveOrgSeat, getOrgEntitlement } from './strapiClient.js';
+import { getPersonalEntitlement, getOrgAccess, orgAccessCovers } from './strapiClient.js';
+
+/**
+ * apps/middleware/src/services/access.js                 MODIFIED (Phase 2)
+ *
+ * Change: the org branch now goes through getOrgAccess()/orgAccessCovers().
+ * The personal branch is unchanged.
+ */
 
 /** ISO date string for "today" in server time. Swap for a specific timezone if your masthead's "today" should be fixed to e.g. Africa/Kampala regardless of server location. */
 export function todayIso() {
@@ -22,8 +29,12 @@ export function todayIso() {
  *
  * A date is accessible if EITHER:
  *   - the user has a personal entitlement covering it, OR
- *   - the user is an active seat in an organization whose own entitlement
- *     covers it (master/child accounts — see epaper-organization/epaper-org-seat)
+ *   - the user holds an ACTIVE seat in an ACTIVE organisation, the org's
+ *     contract covers the date, AND the member's own access window covers
+ *     it too (seats from before member windows existed, source 'legacy',
+ *     need only the contract, which is exactly the old behaviour)
+ * Suspending the org or the seat therefore cuts access at once, without
+ * deleting any history, and reactivating restores it.
  */
 export async function hasAccess({ userId, dateIso }) {
   if (!userId) return false;
@@ -31,11 +42,6 @@ export async function hasAccess({ userId, dateIso }) {
   const personal = await getPersonalEntitlement(userId, dateIso);
   if (personal) return true;
 
-  const seat = await getActiveOrgSeat(userId);
-  if (seat?.organization?.id) {
-    const orgEntitlement = await getOrgEntitlement(seat.organization.id, dateIso);
-    if (orgEntitlement) return true;
-  }
-
-  return false;
+  const orgAccess = await getOrgAccess(userId);
+  return orgAccessCovers(orgAccess, dateIso);
 }
