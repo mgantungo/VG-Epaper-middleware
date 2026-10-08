@@ -3,7 +3,13 @@
  * Repo path: apps/middleware/src/server.js
  * System:    apps/middleware (Express, port 4161)          MODIFIED
  *
- * Change: mounts routes/adminStories.js (story editor) under /api/admin.
+ * Changes:
+ *   - mounts routes/adminStories.js (story editor) under /api/admin.
+ *   - Phase 2 (organisations): mounts routes/adminOrgs.js at
+ *     /api/admin/organisations, ahead of the other /api/admin routers. It is
+ *     gated by ORG_FEATURE_ENABLED=true and returns 404 for everything when
+ *     that is unset. Because it sits on its own sub-path, the gate can't touch
+ *     /api/admin/auth, /api/admin/editions or /api/admin/editor.
  */
 import express from 'express';
 import cors from 'cors';
@@ -16,6 +22,7 @@ import { accountRouter } from './routes/account.js';
 import { authRouter } from './routes/auth.js';
 import { adminRouter } from './routes/admin.js';
 import { adminStoriesRouter } from './routes/adminStories.js';
+import { adminOrgsRouter } from './routes/adminOrgs.js';
 
 const app = express();
 
@@ -44,6 +51,9 @@ app.use('/api/auth', authRouter);
 // server (see apps/handle/server/api/*.ts), never from its browser
 // directly. Server-to-server requests aren't subject to CORS at all —
 // no change needed to the cors() config above for this to work.
+// Organisation management (handle admins with canManageOrganizations) —
+// see routes/adminOrgs.js. Mounted first and on its own sub-path.
+app.use('/api/admin/organisations', adminOrgsRouter);
 app.use('/api/admin', adminRouter);
 // Story editor: /api/admin/editor/* -> apps/ingest (see routes/adminStories.js).
 app.use('/api/admin', adminStoriesRouter);
