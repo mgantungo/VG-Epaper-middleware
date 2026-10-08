@@ -2,7 +2,9 @@
  * apps/middleware/src/services/memberSheet.js            NEW FILE (Phase 3)
  *
  * Reads an Org Admin's member upload (.xlsx or .csv) into plain rows, and
- * builds the downloadable template. Only parsing happens here. Whether a row
+ * builds the downloadable members spreadsheet (UPDATED: pre-filled with
+ * current members when there are any; guided headers, notes and input
+ * checks either way). Only parsing happens here. Whether a row
  * is valid, new, an extension, or over the seat limit is decided in the CMS
  * (org-members.js planRows), so the rules live in one place.
  *
@@ -210,36 +212,155 @@ export async function parseMemberSheet(buffer, filename = '') {
   return parseCsv(buffer);
 }
 
-export async function buildTemplate() {
+const DATA_START_ROW = 4;            // row 1 title, row 2 instructions, row 3 headers
+const LAST_DATA_ROW = DATA_START_ROW + MAX_ROWS - 1;
+
+const COLUMNS = [
+  { key: 'email', header: 'Email', width: 34, note: 'Required. The person\'s email address: their sign-in for the e-paper. One person per row; each email only once.' },
+  { key: 'name', header: 'Name', width: 28, note: 'Optional. Their full name. Used when a new account is created for them.' },
+  { key: 'phone', header: 'Phone', width: 18, note: 'Optional. e.g. 0772123456. This column is text, so the leading 0 is kept.' },
+  { key: 'start', header: 'Start date', width: 14, note: 'Optional. First day of access. Empty = today. Use a real date, or type 2026-10-01 or 01/10/2026 (day first).' },
+  { key: 'end', header: 'End date', width: 14, note: 'Optional. Last day of access. Leave empty and use Months instead if you prefer. Never later than your paid period.' },
+  { key: 'months', header: 'Months', width: 10, note: 'Optional. Number of months of access (1–60), counted from the Start date. Use either End date or Months.' }
+];
+const INFO_COLUMNS = [
+  { key: 'role', header: 'Current role', width: 14 },
+  { key: 'status', header: 'Current status', width: 15 },
+  { key: 'accessEnds', header: 'Current access ends', width: 20 },
+  { key: 'inviteAccepted', header: 'Invite accepted', width: 15 }
+];
+const INFO_NOTE = 'For reference only. This column is ignored when you upload the file.';
+
+/**
+ * The members spreadsheet that both Org Admins (web) and handle admins
+ * download, fill in, and upload again.
+ *
+ *   data = { organisation: { name }, paidUntil, members: [{ email, displayName, phone, role, status, accessEnds, inviteAccepted }] }
+ *
+ * - No members yet: a ready-to-fill sheet. Title + one-line instruction, bold
+ *   frozen headers with a note on every header cell, input checks, and a
+ *   "How to fill this in" tab. Deliberately NO example rows, so nothing fake
+ *   can be uploaded by mistake.
+ * - Members exist: the same sheet, pre-filled with them, plus grey
+ *   "Current …" reference columns that the upload ignores. Their date
+ *   columns are left empty, and an existing member's row only changes when
+ *   dates or months are filled in, so uploading the file unedited changes
+ *   nothing.
+ *
+ * Input checks (Excel data validation) on rows 4..5003: email must contain
+ * "@" and appear once; dates must be real dates; months a whole number
+ * 1–60. Phone is a text column so leading zeros survive.
+ */
+export async function buildTemplate(data = {}) {
+  const orgName = data.organisation?.name || 'Your organisation';
+  const members = Array.isArray(data.members) ? data.members : [];
+  const hasMembers = members.length > 0;
+  const cols = hasMembers ? [...COLUMNS, ...INFO_COLUMNS] : COLUMNS;
+
   const wb = new ExcelJS.Workbook();
   wb.creator = 'New Vision E-Paper';
-  const ws = wb.addWorksheet('Members');
-  ws.columns = [
-    { header: 'Email', key: 'email', width: 34 },
-    { header: 'Name', key: 'name', width: 28 },
-    { header: 'Phone', key: 'phone', width: 18 },
-    { header: 'Start date', key: 'start', width: 14, style: { numFmt: 'yyyy-mm-dd' } },
-    { header: 'End date', key: 'end', width: 14, style: { numFmt: 'yyyy-mm-dd' } },
-    { header: 'Months', key: 'months', width: 10 }
-  ];
-  ws.getRow(1).font = { bold: true };
-  ws.addRow({ email: 'jane.doe@example.org', name: 'Jane Doe', phone: '0772000000', start: null, end: null, months: 12 });
-  ws.addRow({ email: 'john.okello@example.org', name: 'John Okello', phone: '', start: new Date(Date.UTC(2026, 9, 1)), end: new Date(Date.UTC(2027, 2, 31)), months: null });
-  ws.views = [{ state: 'frozen', ySplit: 1 }];
+  wb.created = new Date();
+  const ws = wb.addWorksheet('Members', { views: [{ state: 'frozen', ySplit: 3 }] });
+  cols.forEach((c, i) => { ws.getColumn(i + 1).width = c.width; });
+  ws.getColumn(3).numFmt = '@';            // phone as text
+  ws.getColumn(4).numFmt = 'yyyy-mm-dd';
+  ws.getColumn(5).numFmt = 'yyyy-mm-dd';
 
-  const notes = wb.addWorksheet('How to fill this in');
-  notes.getColumn(1).width = 110;
+  // Row 1: title. Row 2: the one instruction that matters most.
+  ws.getCell('A1').value = `${orgName} — e-paper members`;
+  ws.getCell('A1').font = { bold: true, size: 14 };
+  ws.getCell('A2').value = (hasMembers
+    ? 'Add new people on empty rows below. To change someone\'s access, fill in their Start date / End date or Months; rows left without dates are not changed.'
+    : 'Fill in one person per row, starting on row 4. Only Email is required. Hover over a heading for help, or see the "How to fill this in" tab.')
+    + (data.paidUntil ? ` Your paid period runs until ${data.paidUntil}.` : '');
+  ws.getCell('A2').font = { italic: true, color: { argb: 'FF555555' } };
+  ws.mergeCells(1, 1, 1, cols.length);
+  ws.mergeCells(2, 1, 2, cols.length);
+  ws.getRow(2).height = 48; // merged cells don't auto-grow for wrapped text
+  ws.pageSetup = { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 };
+  ws.getCell('A2').alignment = { wrapText: true, vertical: 'top' };
+
+  // Row 3: headers with notes.
+  const header = ws.getRow(3);
+  cols.forEach((c, i) => {
+    const cell = header.getCell(i + 1);
+    const info = i >= COLUMNS.length;
+    cell.value = c.key === 'email' ? 'Email' : c.header;
+    cell.font = { bold: true, color: { argb: info ? 'FF666666' : 'FFFFFFFF' } };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: info ? 'FFE5E5E5' : 'FF1A1A1A' } };
+    cell.alignment = { vertical: 'middle' };
+    cell.note = info ? INFO_NOTE : c.note;
+  });
+  header.height = 22;
+
+  // Pre-filled members (dates deliberately empty: see above).
+  members.forEach((m, idx) => {
+    const r = ws.getRow(DATA_START_ROW + idx);
+    r.getCell(1).value = m.email || '';
+    r.getCell(2).value = m.displayName || '';
+    r.getCell(3).value = m.phone ? String(m.phone) : '';
+    if (hasMembers) {
+      r.getCell(7).value = m.role || '';
+      r.getCell(8).value = m.status || '';
+      r.getCell(9).value = m.accessEnds || 'none';
+      r.getCell(10).value = m.inviteAccepted ? 'yes' : 'not yet';
+      for (let c = 7; c <= 10; c++) r.getCell(c).font = { color: { argb: 'FF777777' } };
+    }
+  });
+
+  // Input checks.
+  const range = (col) => `${col}${DATA_START_ROW}:${col}${LAST_DATA_ROW}`;
+  ws.dataValidations.add(range('A'), {
+    type: 'custom', allowBlank: true,
+    formulae: [`AND(ISNUMBER(SEARCH("@",A${DATA_START_ROW})),COUNTIF($A$${DATA_START_ROW}:$A$${LAST_DATA_ROW},A${DATA_START_ROW})=1)`],
+    showErrorMessage: true, errorStyle: 'stop', errorTitle: 'Check the email',
+    error: 'Enter a valid email address. Each email can appear only once in the sheet.'
+  });
+  for (const col of ['D', 'E']) {
+    ws.dataValidations.add(range(col), {
+      type: 'date', operator: 'between', allowBlank: true,
+      formulae: [new Date(Date.UTC(2020, 0, 1)), new Date(Date.UTC(2100, 11, 31))],
+      showErrorMessage: true, errorStyle: 'stop', errorTitle: 'Check the date',
+      error: 'Enter a date, for example 2026-10-01 or 01/10/2026.'
+    });
+  }
+  ws.dataValidations.add(range('F'), {
+    type: 'whole', operator: 'between', allowBlank: true, formulae: [1, 60],
+    showErrorMessage: true, errorStyle: 'stop', errorTitle: 'Check the months',
+    error: 'Enter a whole number of months from 1 to 60.'
+  });
+
+  // Help tab.
+  const help = wb.addWorksheet('How to fill this in');
+  help.getColumn(1).width = 100;
+  help.pageSetup = { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 };
   [
-    'One member per row. Only the Email column is required. Delete the two example rows before uploading.',
-    'Name and Phone are used when a new account is created for someone who doesn\'t have one yet; they get an email to set their password.',
-    'People who are already members get their access extended. Nobody is ever duplicated.',
-    'Access period, per row (all optional):',
-    '  - Start date + End date: exactly that period.',
-    '  - Months (with or without a Start date): that many months from the start.',
-    '  - Nothing: uses the default period you choose on the upload screen.',
-    'Start date defaults to today. Access can only fall within your organisation\'s paid period; longer periods are shortened to fit.',
-    'Dates: use real Excel dates, or type them as 2026-10-01 or 01/10/2026 (day first).'
-  ].forEach((line) => notes.addRow([line]));
+    [`${orgName}: e-paper members`, { bold: true, size: 14 }],
+    [''],
+    ['1. One person per row on the "Members" tab, from row 4. Don\'t change the headings in row 3.'],
+    ['2. Email is the only required column. It becomes the person\'s sign-in.'],
+    ['3. Name and Phone are used when an account is created for someone who doesn\'t have one yet. They get an email to set their password.'],
+    ['4. Access period for each row (all optional):'],
+    ['     • Start date + End date: exactly that period.'],
+    ['     • Months (with or without a Start date): that many months from the start. Start defaults to today.'],
+    ['     • Nothing: new people get the default period you choose on the upload screen; existing members are left as they are.'],
+    ['5. Access can only fall within your organisation\'s paid period. Longer periods are shortened to fit, and the upload screen tells you.'],
+    ['6. People already in the organisation are never duplicated: their access is extended when you give dates or months.'],
+    ['7. Grey "Current …" columns (when present) show what is on record today. They are ignored on upload.'],
+    ['8. Save as .xlsx (or .csv) and upload. You see a preview of every row before anything changes.'],
+    [''],
+    [data.paidUntil ? `Paid period: until ${data.paidUntil}.` : 'Paid period: contact New Vision if none is shown on your dashboard.', { italic: true }]
+  ].forEach(([text, font]) => {
+    const row = help.addRow([text]);
+    if (font) row.getCell(1).font = font;
+    row.getCell(1).alignment = { wrapText: true };
+  });
 
   return Buffer.from(await wb.xlsx.writeBuffer());
+}
+
+/** Filename like ministry-of-works-members-2026-10-08.xlsx */
+export function templateFilename(orgName) {
+  const slug = String(orgName || 'organisation').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'organisation';
+  return `${slug}-members-${new Date().toISOString().slice(0, 10)}.xlsx`;
 }
