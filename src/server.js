@@ -10,6 +10,9 @@
  *     gated by ORG_FEATURE_ENABLED=true and returns 404 for everything when
  *     that is unset. Because it sits on its own sub-path, the gate can't touch
  *     /api/admin/auth, /api/admin/editions or /api/admin/editor.
+ *   - Phase 3 (organisations): mounts routes/orgAdmin.js at /api/org-admin
+ *     (the Org Admin dashboard, also gated by ORG_FEATURE_ENABLED) and
+ *     routes/invites.js at /api/auth/invite (accepting an invite).
  */
 import express from 'express';
 import cors from 'cors';
@@ -23,6 +26,8 @@ import { authRouter } from './routes/auth.js';
 import { adminRouter } from './routes/admin.js';
 import { adminStoriesRouter } from './routes/adminStories.js';
 import { adminOrgsRouter } from './routes/adminOrgs.js';
+import { orgAdminRouter } from './routes/orgAdmin.js';
+import { invitesRouter } from './routes/invites.js';
 
 const app = express();
 
@@ -44,7 +49,12 @@ app.use(attachUser);
 app.use('/api/editions', editionsRouter);
 app.use('/api/pay', paymentsRouter);
 app.use('/api/account', accountRouter);
+// Organisation invites: under /api/auth so the path-scoped refresh cookie is
+// set for /api/auth, exactly as on login. Mounted before authRouter.
+app.use('/api/auth/invite', invitesRouter);
 app.use('/api/auth', authRouter);
+// Org Admin dashboard (reader web app /organisation).
+app.use('/api/org-admin', orgAdminRouter);
 // Serves handle.epapers.visiongroup.co.ug — a completely separate app
 // and origin from config.webOrigin above, but that's irrelevant to CORS
 // here: the handle app's own Nitro server calls this router server-to-
