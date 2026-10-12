@@ -19,6 +19,13 @@ export const config = {
   handleAdminJwtSecret: process.env.HANDLE_ADMIN_JWT_SECRET,
   webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3871',
   paymentWebhookSecret: process.env.PAYMENT_WEBHOOK_SECRET,
+  // Access key(s) required by POST /api/search/stories (routes/search.js).
+  // Comma-separated, so several consumers (or a rotation overlap) can each
+  // have their own key. If none is set, the search route refuses every request.
+  searchAccessKeys: (process.env.SEARCH_ACCESS_KEY || '')
+    .split(',')
+    .map((k) => k.trim())
+    .filter(Boolean),
   pricing: {
     subscription: Number(process.env.SUBSCRIPTION_PRICE || 45000),
     subscriptionCurrency: process.env.SUBSCRIPTION_CURRENCY || 'UGX',

@@ -1,4 +1,6 @@
 import express from 'express';
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { config } from '../config.js';
 import { searchStories } from '../services/storySearchClient.js';
 import { hasAccess } from '../services/access.js';
 
@@ -9,6 +11,8 @@ import { hasAccess } from '../services/access.js';
  * External clients never talk to Strapi; this route validates the request,
  * forwards only whitelisted fields, and shapes the response.
  *
+ * Auth:  an access key from SEARCH_ACCESS_KEY (.env), sent as the
+ *        `x-access-key` header (preferred) or the `access_key` query parameter.
  * Body: { query (>=5 words), startDate?, endDate?, page?, pageSize? }
  *
  * Paywall: story text is only revealed for editions the caller may read.
@@ -43,13 +47,36 @@ function rateLimit(req, res, next) {
   next();
 }
 
+// ---- access key (SEARCH_ACCESS_KEY in .env; comma-separated for several keys) ----
+const digest = (value) => createHash('sha256').update(String(value)).digest();
+
+function requireAccessKey(req, res, next) {
+  if (!config.searchAccessKeys.length) {
+    // Fail closed: a missing key must never leave the endpoint open.
+    console.error('[search] SEARCH_ACCESS_KEY is not set — refusing all search requests');
+    return res.status(503).json({ error: 'Search is not configured' });
+  }
+  const provided = req.get('x-access-key') || req.query.access_key;
+  if (typeof provided !== 'string' || !provided) {
+    return res.status(401).json({ error: 'Access key required' });
+  }
+  // Hash both sides so the buffers are equal length and the comparison is constant-time.
+  const given = digest(provided);
+  const ok = config.searchAccessKeys.some((key) => timingSafeEqual(given, digest(key)));
+  if (!ok) {
+    console.warn(`[search] rejected request with an invalid access key from ${req.ip}`);
+    return res.status(401).json({ error: 'Invalid access key' });
+  }
+  next();
+}
+
 /** '.../2026/09/14' -> '2026-09-14' (null if the link has no date). */
 function dateFromLink(link) {
   const m = /(\d{4})\/(\d{2})\/(\d{2})\/?$/.exec(link || '');
   return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
 }
 
-searchRouter.post('/stories', rateLimit, async (req, res) => {
+searchRouter.post('/stories', rateLimit, requireAccessKey, async (req, res) => {
   const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : null;
   if (!body) return res.status(400).json({ error: 'Request body must be a JSON object' });
 
