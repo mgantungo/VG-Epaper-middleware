@@ -13,6 +13,8 @@
  *   - Phase 3 (organisations): mounts routes/orgAdmin.js at /api/org-admin
  *     (the Org Admin dashboard, also gated by ORG_FEATURE_ENABLED) and
  *     routes/invites.js at /api/auth/invite (accepting an invite).
+ *   - Story search: mounts routes/search.js at /api/search (POST /stories),
+ *     which proxies to the CMS full-text search (services/storySearchClient.js).
  */
 import express from 'express';
 import cors from 'cors';
@@ -28,6 +30,7 @@ import { adminStoriesRouter } from './routes/adminStories.js';
 import { adminOrgsRouter } from './routes/adminOrgs.js';
 import { orgAdminRouter } from './routes/orgAdmin.js';
 import { invitesRouter } from './routes/invites.js';
+import { searchRouter } from './routes/search.js';
 
 const app = express();
 
@@ -49,6 +52,8 @@ app.use(attachUser);
 app.use('/api/editions', editionsRouter);
 app.use('/api/pay', paymentsRouter);
 app.use('/api/account', accountRouter);
+// Full-text story search (proxies to the CMS; see routes/search.js).
+app.use('/api/search', searchRouter);
 // Organisation invites: under /api/auth so the path-scoped refresh cookie is
 // set for /api/auth, exactly as on login. Mounted before authRouter.
 app.use('/api/auth/invite', invitesRouter);
