@@ -2,10 +2,10 @@ import fetch from 'node-fetch';
 import { config } from '../config.js';
 
 /**
- * apps/middleware/src/services/storySearchClient.js          NEW FILE
+ * middleware/src/services/storySearchClient.js          NEW FILE
  *
  * Calls the CMS full-text story search (POST /api/stories/search, see
- * apps/cms/src/api/story/{services,controllers,routes}/story-search.js),
+ * cms/src/api/story/{services,controllers,routes}/story-search.js),
  * authenticated with STRAPI_API_TOKEN like every other Strapi call here.
  *
  * Same convention as epaperUserClient.js: never throws. A network failure,
