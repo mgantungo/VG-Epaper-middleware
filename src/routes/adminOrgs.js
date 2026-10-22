@@ -21,13 +21,15 @@
  *   GET    /api/admin/organisations/:id
  *   PATCH  /api/admin/organisations/:id                     name, seatLimit, contact*, notes
  *   POST   /api/admin/organisations/:id/status              { status: active|suspended|archived, reason }
- *   POST   /api/admin/organisations/:id/contracts           { coverageStart, coverageEnd, planKey?, amountPaid?, currency?, note? }
- *   PATCH  /api/admin/organisations/:id/contracts/:cid      { coverageStart?, coverageEnd?, note? }
+ *   POST   /api/admin/organisations/:id/contracts           { coverageStart, coverageEnd, reference?, note?,
+ *                                                              lines: [{ publicationCode, seats, amount }] }  (Phase 0: priced by hand per publication)
+ *   PATCH  /api/admin/organisations/:id/contracts/:cid      { coverageStart?, coverageEnd?, seats?, amount?, reference?, note? }
  *   POST   /api/admin/organisations/:id/contracts/:cid/revoke  { reason }
  *   POST   /api/admin/organisations/:id/admins              { email, grantAccess? }
  *   DELETE /api/admin/organisations/:id/admins/:seatId      demote to member
  *   GET    /api/admin/organisations/:id/members             ?search&status&role&page&pageSize
  *   POST   /api/admin/organisations/:id/members/:seatId/status  { status: active|suspended, reason }
+ *   POST   /api/admin/organisations/:id/members/:seatId/publications  { publications: ['NV','BK'] }  (Phase 0)
  *   GET    /api/admin/organisations/:id/audit               ?page&pageSize
  *   GET    /api/admin/organisations/:id/import/template     .xlsx members spreadsheet (pre-filled / guided)
  *   POST   /api/admin/organisations/:id/import/preview      multipart: file, defaults (JSON string, optional)
@@ -123,6 +125,7 @@ adminOrgsRouter.delete('/:id/admins/:seatId', guard, forward('DELETE', r => `/or
 
 adminOrgsRouter.get('/:id/members', guard, forward('GET', r => `/orgs/${r.params.id}/members`));
 adminOrgsRouter.post('/:id/members/:seatId/status', guard, forward('POST', r => `/orgs/${r.params.id}/members/${r.params.seatId}/status`));
+adminOrgsRouter.post('/:id/members/:seatId/publications', guard, forward('POST', r => `/orgs/${r.params.id}/members/${r.params.seatId}/publications`));
 
 adminOrgsRouter.get('/:id/audit', guard, forward('GET', r => `/orgs/${r.params.id}/audit`));
 

@@ -25,10 +25,7 @@ export const config = {
   searchAccessKeys: (process.env.SEARCH_ACCESS_KEY || '')
     .split(',')
     .map((k) => k.trim())
-    .filter(Boolean),
-  pricing: {
-    subscription: Number(process.env.SUBSCRIPTION_PRICE || 45000),
-    subscriptionCurrency: process.env.SUBSCRIPTION_CURRENCY || 'UGX',
-    archiveEdition: Number(process.env.ARCHIVE_EDITION_PRICE || 1000)
-  }
+    .filter(Boolean)
+  // Prices are no longer configured here: every plan and price is set in
+  // handle (Publications > Plans and prices) and read from the CMS (Phase 0).
 };

@@ -17,6 +17,7 @@
  *   POST /api/org-admin/members/:seatId/role       { role: member|admin }
  *   POST /api/org-admin/members/:seatId/remove     { reason? }
  *   POST /api/org-admin/members/:seatId/resend-invite
+ *   POST /api/org-admin/members/:seatId/publications { publications: ['NV','BK'] }  (Phase 0)
  *   GET  /api/org-admin/import/template            .xlsx: the members spreadsheet (current members
  *                                                  pre-filled; guided empty sheet if none yet)
  *   POST /api/org-admin/import/preview             multipart: file (.xlsx/.csv), defaults (JSON string, optional)
@@ -92,6 +93,7 @@ orgAdminRouter.post('/members/:seatId/status', forward('POST', (r) => `/members/
 orgAdminRouter.post('/members/:seatId/role', forward('POST', (r) => `/members/${r.params.seatId}/role`));
 orgAdminRouter.post('/members/:seatId/remove', forward('POST', (r) => `/members/${r.params.seatId}/remove`));
 orgAdminRouter.post('/members/:seatId/resend-invite', forward('POST', (r) => `/members/${r.params.seatId}/resend-invite`));
+orgAdminRouter.post('/members/:seatId/publications', forward('POST', (r) => `/members/${r.params.seatId}/publications`));
 orgAdminRouter.get('/audit', forward('GET', '/audit'));
 
 orgAdminRouter.get('/import/template', async (req, res) => {

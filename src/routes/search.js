@@ -17,7 +17,8 @@ import { hasAccess } from '../services/access.js';
  *
  * Paywall: story text is only revealed for editions the caller may read.
  * attachUser (server.js) sets req.userId when a valid token is sent; each
- * result's edition date is checked with hasAccess(), once per distinct date.
+ * result's edition is checked with hasAccess() per PUBLICATION and the days
+ * it covers (Phase 0), once per distinct edition.
  * Results the caller can't read come back with locked: true and snippet: null
  * (headline, teaser, section and page number stay visible).
  */
@@ -70,7 +71,7 @@ function requireAccessKey(req, res, next) {
   next();
 }
 
-/** '.../2026/09/14' -> '2026-09-14' (null if the link has no date). */
+/** '.../nv/2026/09/14' or '.../2026/09/14' -> '2026-09-14' (null if the link has no date). */
 function dateFromLink(link) {
   const m = /(\d{4})\/(\d{2})\/(\d{2})\/?$/.exec(link || '');
   return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
@@ -98,25 +99,36 @@ searchRouter.post('/stories', rateLimit, requireAccessKey, async (req, res) => {
 
   const results = result.data?.data || [];
 
-  // One hasAccess() per distinct edition date, not per result.
-  const accessByDate = new Map();
+  // One hasAccess() per distinct edition (publication + date), not per result.
+  // Older CMS responses without publicationCode mean New Vision.
+  const editionOf = (r) => {
+    const date = r.editionDate || dateFromLink(r.epaperLink);
+    if (!date) return null;
+    const pub = String(r.publicationCode || String(r.editionSku || '').split('-')[1] || 'NV').toUpperCase();
+    return { key: `${pub}|${date}`, pub, from: date, to: r.editionCoversTo || date };
+  };
+  const accessByEdition = new Map();
   if (req.userId) {
-    const dates = [...new Set(results.map((r) => dateFromLink(r.epaperLink)).filter(Boolean))];
+    const distinct = new Map();
+    for (const r of results) {
+      const e = editionOf(r);
+      if (e) distinct.set(e.key, e);
+    }
     await Promise.all(
-      dates.map(async (dateIso) => {
+      [...distinct.values()].map(async (e) => {
         try {
-          accessByDate.set(dateIso, await hasAccess({ userId: req.userId, dateIso }));
+          accessByEdition.set(e.key, await hasAccess({ userId: req.userId, publication: e.pub, from: e.from, to: e.to }));
         } catch (err) {
-          console.error('[search] access check failed for', dateIso, err.message);
-          accessByDate.set(dateIso, false); // fail closed
+          console.error('[search] access check failed for', e.key, err.message);
+          accessByEdition.set(e.key, false); // fail closed
         }
       })
     );
   }
 
   const data = results.map((r) => {
-    const dateIso = dateFromLink(r.epaperLink);
-    const unlocked = Boolean(dateIso && accessByDate.get(dateIso));
+    const e = editionOf(r);
+    const unlocked = Boolean(e && accessByEdition.get(e.key));
     return { ...r, locked: !unlocked, snippet: unlocked ? r.snippet : null };
   });
 

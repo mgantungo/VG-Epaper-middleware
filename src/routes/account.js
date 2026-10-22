@@ -1,49 +1,55 @@
 import { Router } from 'express';
-import { getPersonalEntitlement, getOrgAccess, orgAccessCovers, orgAccessRanges, getEntitlementRanges } from '../services/strapiClient.js';
-import { todayIso } from '../services/access.js';
+import { getAccessProfile, accessSummary, todayIso } from '../services/access.js';
+import { getStorefront } from '../services/strapiClient.js';
 import { requireUser } from '../middleware/auth.js';
 
 /**
- * apps/middleware/src/routes/account.js                  MODIFIED (Phase 2)
+ * apps/middleware/src/routes/account.js             REWRITTEN (Phase 0)
  *
- * Change: today's org access goes through the same rule as hasAccess(), and
- * the response gains an additive `organisation` field ({ id, name, role,
- * status } or null), which the web app will use in Phase 5 to show the
- * Organisation dashboard link to Org Admins. Existing fields are unchanged.
+ * GET /api/account/me
+ *   {
+ *     user,
+ *     publications: { NV: { today, until, via, ranges }, BK: {...}, ... },
+ *     subscriptionActive, subscriptionExpiresAt,   // kept: true if ANY publication is open today
+ *     entitlementRanges,                            // kept: New Vision ranges, for older clients
+ *     organisation: { id, name, role, status, publications } | null
+ *   }
+ * Access is per publication now (each paper is sold separately); the two
+ * old summary fields are derived from it so older screens keep working.
  */
 
 export const accountRouter = Router();
 
 accountRouter.get('/me', requireUser, async (req, res) => {
-  const today = todayIso();
+  try {
+    const today = todayIso();
+    const [profile, store] = await Promise.all([getAccessProfile(req.userId), getStorefront().catch(() => ({ publications: [] }))]);
+    const codes = new Set((store.publications || []).map(p => p.code));
+    for (const e of profile?.personal || []) codes.add(e.publication);
+    for (const c of profile?.org?.contracts || []) codes.add(c.publication);
+    const publications = accessSummary(profile, [...codes].sort(), today);
 
-  // "Does today's paper unlock for this reader right now" — same rough
-  // meaning subscriptionActive always had, just resolved through the
-  // unified entitlement check instead of a dedicated Subscription record.
-  const personal = await getPersonalEntitlement(req.userId, today);
-  const orgAccess = await getOrgAccess(req.userId);
+    const openToday = Object.values(publications).filter(p => p.today);
+    const org = profile?.org || null;
 
-  let subscriptionActive = Boolean(personal);
-  let subscriptionExpiresAt = personal?.coverageEnd || null;
-
-  if (!personal && orgAccessCovers(orgAccess, today)) {
-    subscriptionActive = true;
-    const covering = orgAccessRanges(orgAccess).filter(r => r.start <= today && today <= r.end);
-    subscriptionExpiresAt = covering.reduce((m, r) => (r.end > m ? r.end : m), '') || null;
+    res.json({
+      user: req.userProfile,
+      publications,
+      subscriptionActive: openToday.length > 0,
+      subscriptionExpiresAt: openToday.reduce((m, p) => (p.until > m ? p.until : m), '') || null,
+      entitlementRanges: (publications.NV?.ranges || []).map(({ start, end }) => ({ start, end })),
+      organisation: org
+        ? {
+            id: org.orgId,
+            name: org.orgName,
+            role: org.role,
+            status: org.orgStatus,
+            publications: org.seatPublications ?? [...new Set((org.contracts || []).map(c => c.publication))]
+          }
+        : null
+    });
+  } catch (err) {
+    console.error('[account] me failed:', err.message);
+    res.status(502).json({ error: 'Could not load your account' });
   }
-
-  const entitlementRanges = await getEntitlementRanges(req.userId);
-
-  res.json({
-    user: req.userProfile,
-    subscriptionActive,
-    subscriptionExpiresAt,
-    // Replaces the old flat purchasedDates array — see
-    // getEntitlementRanges()'s own comment for why a flat date list no
-    // longer works now that one entitlement can span a whole period.
-    entitlementRanges,
-    organisation: orgAccess
-      ? { id: orgAccess.orgId, name: orgAccess.orgName, role: orgAccess.role, status: orgAccess.orgStatus }
-      : null
-  });
 });

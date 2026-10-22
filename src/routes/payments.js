@@ -1,101 +1,72 @@
 import { Router } from 'express';
 import fetch from 'node-fetch';
 import { config } from '../config.js';
-import { todayIso } from '../services/access.js';
+import { todayIso, invalidateAccess } from '../services/access.js';
+import { getCurrentPlans } from '../services/strapiClient.js';
 
 export const paymentsRouter = Router();
 
 /**
- * GET /api/pay/plans
- * Real plan data — key, label, price, currency, kind, durationDays — from
- * Strapi's epaper-plan collection, replacing the hardcoded
- * config.pricing.subscription/archiveEdition values editions.js's
- * priceFor() has been using. The paywall's plan picker calls this to
- * render its radio options with real, currently-configured prices;
- * changing a price in Strapi admin now actually reaches the UI without
- * any code change, which config.pricing values never could.
- * Requires the Public role's `find` permission enabled for epaper-plan in
- * Strapi (Settings -> Users & Permissions -> Roles -> Public ->
- * epaper-plan -> find) — read-only, no write permissions needed or
- * recommended there.
+ * MODIFIED (Phase 0: publications, plans and paper-aware access)
+ *
+ * GET /api/pay/plans?publication=BK
+ * The standard plans on sale today, from the CMS catalogue (prices are set
+ * in handle, never in code or env). With ?publication= only the plans that
+ * include that publication: what the paywall offers for the paper being read.
+ *   { plans: [{ key, version, label, kind: period|single_issue,
+ *               durationUnit, durationCount, price, currency,
+ *               publications: ['BK', 'BKW'], featured }], today }
  */
 paymentsRouter.get('/plans', async (req, res) => {
   try {
-    const strapiRes = await fetch(
-      `${config.strapiUrl}/api/epaper-plans?filters[active][$eq]=true&sort=sortOrder:asc&pagination[pageSize]=100`,
-      { headers: { Authorization: `Bearer ${config.strapiApiToken}` } }
-    );
-    if (!strapiRes.ok) {
-      return res.status(strapiRes.status).json({ error: 'Could not load plans' });
-    }
-    const json = await strapiRes.json();
-    const plans = (json.data || []).map(p => ({
-      key: p.key,
-      label: p.label,
-      kind: p.kind,
-      durationDays: p.durationDays,
-      price: p.price,
-      currency: p.currency,
-      allowsOrgPurchase: p.allowsOrgPurchase
-    }));
-    res.json({ plans });
+    const out = await getCurrentPlans(req.query.publication);
+    res.json({
+      today: out.today,
+      plans: (out.plans || []).map(p => ({
+        key: p.key,
+        version: p.version,
+        label: p.label,
+        description: p.description,
+        kind: p.kind,
+        durationUnit: p.durationUnit,
+        durationCount: p.durationCount,
+        price: p.price,
+        currency: p.currency,
+        publications: p.publications,
+        featured: p.featured
+      }))
+    });
   } catch (err) {
-    console.error('[payments] plans: could not reach Strapi:', err.message);
-    res.status(502).json({ error: 'Could not reach payment service' });
+    console.error('[payments] plans: could not load from the CMS:', err.message);
+    res.status(502).json({ error: 'Could not load plans' });
   }
 });
 
 /**
  * POST /api/pay/checkout
- * Body: { date: "YYYY-MM-DD" | "today", phoneNumber, paymentmethod }
- *    OR { dates: ["YYYY-MM-DD", ...], phoneNumber, paymentmethod }
+ * Body: { planKey, phoneNumber, paymentmethod,
+ *         date?: "YYYY-MM-DD" | "today",   single-issue plans: the edition
+ *         dates?: ["YYYY-MM-DD", ...] }     single-issue plans: several back issues
  *
- * Proxies to Strapi's POST /api/epaper-transactions/initialize. `dates`
- * (plural) is the "buy any number of archives in one purchase" shape —
- * every entry becomes its own entitlement once payment succeeds (see
- * epaper-transaction's grantEntitlement()), priced as
- * single_archive.price × number of dates. `date` (singular) still works
- * exactly as before — "today" maps to the daily plan, any other single
- * date maps to a one-element archive purchase. Only one of date/dates
- * should be sent; dates wins if both are present.
+ * Individuals only, at the standard price on sale today. The CMS works out
+ * the amount from the plan version and, for single-issue plans, finds the
+ * plan's publication's editions on those dates — the client never sends a
+ * price or an edition id. Organisations are not sold online; their
+ * contracts are priced by hand in handle.
  *
- * SCOPED DELIBERATELY: personal purchases only, no organization_new/
- * organization_topup — those exist as real options in epaper-plan
- * already, but choosing between them needs picker UI the frontend
- * doesn't have yet.
- *
- * NOTE: unlike the old "assume yes" version, this does NOT grant access
- * itself and does NOT return an external checkoutUrl to redirect to — the
- * integrator sends a payment PIN prompt directly to the customer's phone,
- * there's no hosted checkout page to redirect to.
+ * The integrator sends a payment PIN prompt to the customer's phone; there
+ * is no hosted checkout page to redirect to.
  */
 paymentsRouter.post('/checkout', async (req, res) => {
   if (!req.userId) return res.status(401).json({ error: 'Sign in required' });
 
-  const { phoneNumber, paymentmethod } = req.body || {};
-  if (!phoneNumber || !paymentmethod) {
-    return res.status(400).json({ error: 'phoneNumber and paymentmethod are required' });
+  const { phoneNumber, paymentmethod, planKey } = req.body || {};
+  if (!phoneNumber || !paymentmethod || !planKey) {
+    return res.status(400).json({ error: 'planKey, phoneNumber and paymentmethod are required' });
   }
 
-  const rawDates = Array.isArray(req.body?.dates) ? req.body.dates : null;
-  const singleDateIso = req.body?.date === 'today' ? todayIso() : req.body?.date;
-
-  if (!rawDates && !singleDateIso) {
-    return res.status(400).json({ error: 'date or dates is required' });
-  }
-
-  // A multi-date request is always an archive purchase — "today" isn't an
-  // archive date yet, so it doesn't belong mixed into this shape; it goes
-  // through the singular `date: 'today'` path below instead.
-  const isMultiArchive = Boolean(rawDates && rawDates.length);
-  const isToday = !isMultiArchive && singleDateIso === todayIso();
-
-  // planKey is now explicit from the plan picker (radio selection) rather
-  // than always auto-derived from the date — the whole point of letting
-  // someone choose weekly/monthly/etc. instead of just paying for today.
-  // Still falls back to the old auto-derivation when the caller doesn't
-  // send one, so nothing that predates the plan picker breaks.
-  const planKey = req.body?.planKey || (isToday ? 'daily' : 'single_archive');
+  const raw = Array.isArray(req.body?.dates) ? req.body.dates : (req.body?.date ? [req.body.date] : []);
+  const editionDates = raw.map(d => (d === 'today' ? todayIso() : String(d))).filter(Boolean);
 
   try {
     const strapiRes = await fetch(`${config.strapiUrl}/api/epaper-transactions/initialize`, {
@@ -110,9 +81,7 @@ paymentsRouter.post('/checkout', async (req, res) => {
         customerName: req.userProfile?.displayName || '',
         customerEmail: req.userProfile?.email || '',
         customerPhone: phoneNumber,
-        ...(isMultiArchive
-          ? { archiveDates: rawDates }
-          : { archiveDate: isToday ? undefined : singleDateIso })
+        editionDates
       })
     });
     const data = await strapiRes.json();
@@ -126,7 +95,9 @@ paymentsRouter.post('/checkout', async (req, res) => {
       amount: data.amount,
       currency: data.currency,
       status: data.status,
-      archiveDatesCount: data.archiveDatesCount
+      planLabel: data.planLabel,
+      publicationCodes: data.publicationCodes,
+      editionsCount: data.editionsCount
     });
   } catch (err) {
     console.error('[payments] checkout: could not reach Strapi:', err.message);
@@ -145,6 +116,8 @@ paymentsRouter.get('/status/:receiptToken', async (req, res) => {
       headers: { Authorization: `Bearer ${config.strapiApiToken}` }
     });
     const data = await strapiRes.json();
+    // Access granted: drop this reader's cached access so the paper opens on their very next request.
+    if (data?.access_ready && req.userId) invalidateAccess(req.userId);
     res.status(strapiRes.status).json(data);
   } catch (err) {
     console.error('[payments] status: could not reach Strapi:', err.message);

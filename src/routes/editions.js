@@ -1,99 +1,116 @@
 /**
- * File:      /var/www/VGEpaper/apps/middleware/src/routes/editions.js
+ * File:      /var/www/VGEpaper/middleware/src/routes/editions.js
  * Repo path: apps/middleware/src/routes/editions.js
- * System:    apps/middleware (Express, port 4161)          MODIFIED
+ * System:    apps/middleware (Express, port 4161)      REWRITTEN (Phase 0)
  *
- * Change: readers only receive active stories (reviewState empty or
- * 'active'); stories dropped or awaiting drop in the handle editor are hidden.
+ * Editions are addressed by PUBLICATION and date:
+ *   GET /api/editions/:pub/:date                 :date = YYYY-MM-DD | today | latest
+ *   GET /api/editions/:pub/:date/pages/:num.jpg  page image, access re-checked
+ *   GET /api/editions/:pub/:date/cover.jpg       front page, free to preview
+ *   GET /api/editions/me/ranges?publication=NV   what this reader can open (archive badges)
+ *
+ * A date finds the edition that COVERS it: /nvw/2026-10-25 (a Sunday) opens
+ * the weekend edition dated Saturday 24th.
+ *
+ * Old date-only URLs (/api/editions/2026-10-22, /api/editions/today and
+ * their page images) still work and mean New Vision daily, so bookmarks and
+ * shared links from before Phase 0 keep opening.
+ *
+ * Readers only receive active stories (reviewState empty or 'active');
+ * stories dropped or awaiting drop in the handle editor are hidden.
  */
 import { Router } from 'express';
 import fetch from 'node-fetch';
-import { config } from '../config.js';
-import { getEditionByDate, getPageImageUrl, getEntitlementRanges, getPlanByKey } from '../services/strapiClient.js';
-import { hasAccess, todayIso } from '../services/access.js';
+import {
+  getEditionFor, pageImageUrl, editionCover, getStorefront, getCurrentPlans
+} from '../services/strapiClient.js';
+import { hasAccess, todayIso, getAccessProfile, readableRanges, normPub } from '../services/access.js';
 
 export const editionsRouter = Router();
+
+const LEGACY_PUB = 'NV';
+const PUB_RE = /^[A-Za-z0-9]{1,12}$/;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 // Stories created before reviewState existed have it empty: those count as active.
 const isReaderVisible = s => !s.reviewState || s.reviewState === 'active';
 
-// NOTE: still reading static config.pricing here, not epaper-plan's actual
-// price — deliberately left as-is for this pass, since wiring the paywall's
-// displayed price to real Plan records belongs with the /checkout rebuild
-// (the next item in the series), not this entitlement-checking one. This
-// will need to change then, not forgotten, just sequenced.
-/**
- * Real price from the epaper-plan collection now — replaces the old
- * static config.pricing.subscription/archiveEdition values, which never
- * reflected a price change made in Strapi admin. Falls back to those same
- * static values only if the plan lookup fails for some reason (Strapi
- * unreachable, plan not found) — a locked preview should still show SOME
- * reasonable price rather than break entirely over a pricing lookup.
- * Per-edition archivePriceOverride still wins over the plan's own price
- * when set, unchanged from before.
- */
-async function priceFor(dateIso, edition) {
-  const isToday = dateIso === todayIso();
-  const planKey = isToday ? 'daily' : 'single_archive';
-  const plan = await getPlanByKey(planKey);
-
-  if (isToday) {
-    return {
-      amount: plan?.price ?? config.pricing.subscription,
-      currency: plan?.currency ?? config.pricing.subscriptionCurrency,
-      kind: 'subscription'
-    };
+/** :date -> YYYY-MM-DD, resolving 'today' and 'latest'; null if invalid. */
+async function resolveDate(pub, raw) {
+  if (raw === 'today') return todayIso();
+  if (raw === 'latest') {
+    const store = await getStorefront();
+    const p = (store.publications || []).find(x => x.code === pub);
+    return p?.latestEdition?.date || null;
   }
-  const override = edition?.archivePriceOverride;
+  return DATE_RE.test(raw) ? raw : null;
+}
+
+function publicationInfo(edition, pub) {
+  const p = edition.publication || {};
   return {
-    amount: override ?? plan?.price ?? config.pricing.archiveEdition,
-    currency: plan?.currency ?? 'UGX',
-    kind: 'archive_purchase'
+    code: p.code || pub,
+    name: p.name || pub,
+    title: p.title || p.name || pub,
+    editionLabel: p.editionLabel || null,
+    colour: p.colour || null
   };
 }
 
-/**
- * GET /api/editions/:date
- * :date is either "today" or YYYY-MM-DD. Defaults to the server's current
- * date when the literal "today" is used, so the frontend never has to compute
- * "today" itself — this is the single source of truth for what "today" means.
- *
- * Always returns edition metadata (so the paywall can show a locked preview
- * with the real date/price), but page image URLs and story text are only
- * included when the requester actually has access.
- *
- * Response shapes below read Strapi 5's flattened fields directly (e.g.
- * `edition.pages[i].image.url`) — there is no `.attributes` wrapper to dig
- * through, unlike Strapi 4. `section`/`sku`/`editionSku` are plain scalar
- * fields, not relations — Strapi returns them automatically without
- * needing an explicit populate, so strapiClient.js's existing query didn't
- * need changing to start receiving them; this file just wasn't forwarding
- * all of them into the response shape actually sent to the frontend.
- */
-editionsRouter.get('/:date', async (req, res) => {
-  const dateIso = req.params.date === 'today' ? todayIso() : req.params.date;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateIso)) {
-    return res.status(400).json({ error: 'date must be YYYY-MM-DD or "today"' });
+/** Single-issue price for the locked preview ("buy this edition"), from the plans on sale. */
+async function singleIssuePrice(pub, edition) {
+  try {
+    const { plans } = await getCurrentPlans(pub);
+    const single = (plans || []).find(p => p.kind === 'single_issue' && p.publications.length === 1);
+    if (!single) return null;
+    const override = edition?.archivePriceOverride;
+    const isArchive = (edition.coversTo || edition.date) < todayIso();
+    return {
+      planKey: single.key,
+      amount: isArchive && override ? Number(override) : single.price,
+      currency: single.currency || 'UGX',
+      kind: 'single_issue'
+    };
+  } catch (err) {
+    console.error('[editions] could not load plans for the paywall:', err.message);
+    return null;
+  }
+}
+
+async function sendEdition(req, res, pub, rawDate) {
+  if (!PUB_RE.test(pub)) return res.status(400).json({ error: 'Unknown publication' });
+  const dateIso = await resolveDate(pub, rawDate);
+  if (!dateIso) {
+    return res.status(rawDate === 'latest' ? 404 : 400)
+      .json({ error: rawDate === 'latest' ? 'Nothing published yet for this publication' : 'date must be YYYY-MM-DD, "today" or "latest"' });
   }
 
-  const edition = await getEditionByDate(dateIso);
-  if (!edition) {
-    return res.status(404).json({ error: 'No published edition for this date' });
-  }
+  const edition = await getEditionFor(pub, dateIso);
+  if (!edition) return res.status(404).json({ error: `No published ${pub} edition for this date`, publicationCode: pub, date: dateIso });
 
-  const granted = await hasAccess({ userId: req.userId, dateIso });
+  const cover = editionCover(edition);
+  const granted = await hasAccess({ userId: req.userId, publication: pub, from: cover.from, to: cover.to });
 
   const sortedPages = [...(edition.pages || [])].sort((a, b) => a.pageNumber - b.pageNumber);
   const basePages = sortedPages.map(p => ({ pageNumber: p.pageNumber, section: p.section }));
+  const base = {
+    date: edition.date,
+    requestedDate: dateIso,
+    coversFrom: cover.from,
+    coversTo: cover.to,
+    editionId: edition.documentId,
+    sku: edition.sku,
+    publicationCode: pub,
+    publication: publicationInfo(edition, pub),
+    pageCount: edition.pageCount,
+    coverUrl: `/api/editions/${pub.toLowerCase()}/${edition.date}/cover.jpg`
+  };
 
   if (!granted) {
     return res.json({
-      date: dateIso,
+      ...base,
       locked: true,
-      sku: edition.sku,
-      publicationCode: edition.publicationCode,
-      pageCount: edition.pageCount,
-      price: await priceFor(dateIso, edition),
+      price: await singleIssuePrice(pub, edition),
       pages: basePages // page numbers/sections only — no image URLs, no story text
     });
   }
@@ -102,9 +119,7 @@ editionsRouter.get('/:date', async (req, res) => {
     pageNumber: p.pageNumber,
     section: p.section,
     editionSku: p.editionSku,
-    // Signed/short-lived URLs in production — see the README note on
-    // fronting this with a real CDN instead of proxying through Node.
-    imageUrl: `/api/editions/${dateIso}/pages/${p.pageNumber}.jpg`,
+    imageUrl: `/api/editions/${pub.toLowerCase()}/${edition.date}/pages/${p.pageNumber}.jpg`,
     stories: (p.stories || []).filter(isReaderVisible).map(s => ({
       id: s.documentId,
       editionSku: s.editionSku,
@@ -114,56 +129,116 @@ editionsRouter.get('/:date', async (req, res) => {
       byline: s.byline,
       teaser: s.teaser,
       body: s.body,
-      // Only ever set when the ingest engine found an explicit jump-line
-      // marker in the text ("Turned to Page N" / "Continued from Page N")
-      // — null otherwise, never guessed from layout alone. See
-      // apps/ingest/src/pipeline/extractSections.js's own comments.
+      // Only set when ingest found an explicit jump-line marker ("Turned to
+      // Page N" / "Continued from Page N") — never guessed from layout.
       continuesToPage: s.continuesToPage ?? null,
       continuesFromPage: s.continuesFromPage ?? null
     }))
   }));
 
   res.json({
-    date: dateIso,
+    ...base,
     locked: false,
-    sku: edition.sku,
-    publicationCode: edition.publicationCode,
     volume: edition.volume,
     issueNumber: edition.issueNumber,
     coverPrice: edition.coverPrice,
     currency: edition.currency,
-    pageCount: edition.pageCount,
     pages
   });
-});
+}
 
-/**
- * GET /api/editions/:date/pages/:num.jpg
- * Streams the actual page image, re-checking access on THIS request — not
- * just relying on the caller having seen a granted /:date response earlier.
- * That matters because someone could otherwise bookmark/share an image URL
- * and read a paid edition without ever passing the entitlement check.
- */
-editionsRouter.get('/:date/pages/:num.jpg', async (req, res) => {
-  const dateIso = req.params.date === 'today' ? todayIso() : req.params.date;
-  const granted = await hasAccess({ userId: req.userId, dateIso });
-  if (!granted) return res.status(402).json({ error: 'Payment required' });
-
-  const imageUrl = await getPageImageUrl(dateIso, Number(req.params.num));
-  if (!imageUrl) return res.status(404).end();
-
-  const upstream = await fetch(imageUrl);
+async function streamImage(res, url, cacheControl) {
+  const upstream = await fetch(url);
   if (!upstream.ok) return res.status(502).end();
   res.set('Content-Type', upstream.headers.get('content-type') || 'image/jpeg');
-  res.set('Cache-Control', 'private, max-age=3600'); // private: this response is only valid for the requester who was just entitlement-checked
+  res.set('Cache-Control', cacheControl);
   upstream.body.pipe(res);
+}
+
+/**
+ * Page image, re-checking access on THIS request — not just relying on the
+ * caller having seen a granted edition response — so a bookmarked or shared
+ * image URL never opens a paid page.
+ */
+async function sendPage(req, res, pub, rawDate, num) {
+  if (!PUB_RE.test(pub)) return res.status(400).end();
+  const dateIso = await resolveDate(pub, rawDate);
+  if (!dateIso) return res.status(400).end();
+  const edition = await getEditionFor(pub, dateIso);
+  if (!edition) return res.status(404).end();
+  const cover = editionCover(edition);
+  const granted = await hasAccess({ userId: req.userId, publication: pub, from: cover.from, to: cover.to });
+  if (!granted) return res.status(402).json({ error: 'Payment required' });
+  const url = pageImageUrl(edition, Number(num));
+  if (!url) return res.status(404).end();
+  // private: only valid for the reader who was just checked
+  return streamImage(res, url, 'private, max-age=3600');
+}
+
+// ---- reader's own access (registered before /:pub/:date so 'me' isn't a publication) ----
+
+/** GET /api/editions/me/ranges?publication=NV -> { publication, ranges: [{start,end,source}] } */
+editionsRouter.get('/me/ranges', async (req, res) => {
+  const pub = normPub(req.query.publication || LEGACY_PUB);
+  if (!req.userId) return res.json({ publication: pub, ranges: [] });
+  try {
+    const profile = await getAccessProfile(req.userId);
+    res.json({ publication: pub, ranges: readableRanges(profile, pub) });
+  } catch (err) {
+    console.error('[editions] ranges failed:', err.message);
+    res.status(502).json({ error: 'Could not load your access' });
+  }
 });
 
-/** This user's entitlement date ranges — powers the lock badges in the
- * Archive UI. Was `{ dates: [...] }` (flat list); now `{ ranges: [...] }`,
- * since one entitlement can span a whole subscription period, not just a
- * single purchased day — see getEntitlementRanges()'s own comment. */
+/** Older name for the same thing (New Vision unless ?publication= is given). */
 editionsRouter.get('/me/purchased-dates', async (req, res) => {
+  const pub = normPub(req.query.publication || LEGACY_PUB);
   if (!req.userId) return res.json({ ranges: [] });
-  res.json({ ranges: await getEntitlementRanges(req.userId) });
+  try {
+    const profile = await getAccessProfile(req.userId);
+    res.json({ ranges: readableRanges(profile, pub).map(({ start, end }) => ({ start, end })) });
+  } catch (err) {
+    console.error('[editions] purchased-dates failed:', err.message);
+    res.status(502).json({ error: 'Could not load your access' });
+  }
+});
+
+// ---- legacy date-only URLs = New Vision ---------------------------------------
+
+editionsRouter.get('/:date', async (req, res, next) => {
+  if (req.params.date !== 'today' && !DATE_RE.test(req.params.date)) return next();
+  try { await sendEdition(req, res, LEGACY_PUB, req.params.date); } catch (err) { next(err); }
+});
+
+editionsRouter.get('/:date/pages/:num.jpg', async (req, res, next) => {
+  if (req.params.date !== 'today' && !DATE_RE.test(req.params.date)) return next();
+  try { await sendPage(req, res, LEGACY_PUB, req.params.date, req.params.num); } catch (err) { next(err); }
+});
+
+// ---- publication URLs ---------------------------------------------------------
+
+editionsRouter.get('/:pub/:date', async (req, res, next) => {
+  try { await sendEdition(req, res, normPub(req.params.pub), req.params.date); } catch (err) { next(err); }
+});
+
+editionsRouter.get('/:pub/:date/pages/:num.jpg', async (req, res, next) => {
+  try { await sendPage(req, res, normPub(req.params.pub), req.params.date, req.params.num); } catch (err) { next(err); }
+});
+
+/** Front page of any published edition, free for everyone (landing page and paywall preview). */
+editionsRouter.get('/:pub/:date/cover.jpg', async (req, res, next) => {
+  try {
+    const pub = normPub(req.params.pub);
+    if (!PUB_RE.test(pub)) return res.status(400).end();
+    const dateIso = await resolveDate(pub, req.params.date);
+    if (!dateIso) return res.status(400).end();
+    const edition = await getEditionFor(pub, dateIso);
+    if (!edition) return res.status(404).end();
+    const firstPage = [...(edition.pages || [])].sort((a, b) => a.pageNumber - b.pageNumber)[0];
+    const url = firstPage ? pageImageUrl(edition, firstPage.pageNumber) : null;
+    if (!url) return res.status(404).end();
+    return streamImage(res, url, 'public, max-age=600');
+  } catch (err) {
+    next(err);
+  }
 });

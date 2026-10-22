@@ -15,6 +15,9 @@
  *     routes/invites.js at /api/auth/invite (accepting an invite).
  *   - Story search: mounts routes/search.js at /api/search (POST /stories),
  *     which proxies to the CMS full-text search (services/storySearchClient.js).
+ *   - Phase 0 (publications): mounts routes/catalogue.js at /api/catalogue
+ *     (reader landing page) and routes/adminCatalogue.js at
+ *     /api/admin/catalogue (handle: publications, plans and prices).
  */
 import express from 'express';
 import cors from 'cors';
@@ -31,6 +34,8 @@ import { adminOrgsRouter } from './routes/adminOrgs.js';
 import { orgAdminRouter } from './routes/orgAdmin.js';
 import { invitesRouter } from './routes/invites.js';
 import { searchRouter } from './routes/search.js';
+import { catalogueRouter } from './routes/catalogue.js';
+import { adminCatalogueRouter } from './routes/adminCatalogue.js';
 
 const app = express();
 
@@ -50,6 +55,8 @@ app.use((req, res, next) => {
 app.use(attachUser);
 
 app.use('/api/editions', editionsRouter);
+// Landing page: publications, latest editions, plans, the reader's access (Phase 0).
+app.use('/api/catalogue', catalogueRouter);
 app.use('/api/pay', paymentsRouter);
 app.use('/api/account', accountRouter);
 // Full-text story search (proxies to the CMS; see routes/search.js).
@@ -69,6 +76,8 @@ app.use('/api/org-admin', orgAdminRouter);
 // Organisation management (handle admins with canManageOrganizations) —
 // see routes/adminOrgs.js. Mounted first and on its own sub-path.
 app.use('/api/admin/organisations', adminOrgsRouter);
+// Publications, plans and prices (handle; changes need canManageOrganizations). Phase 0.
+app.use('/api/admin/catalogue', adminCatalogueRouter);
 app.use('/api/admin', adminRouter);
 // Story editor: /api/admin/editor/* -> apps/ingest (see routes/adminStories.js).
 app.use('/api/admin', adminStoriesRouter);
