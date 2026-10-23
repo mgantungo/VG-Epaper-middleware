@@ -18,6 +18,10 @@
  *   - Phase 0 (publications): mounts routes/catalogue.js at /api/catalogue
  *     (reader landing page) and routes/adminCatalogue.js at
  *     /api/admin/catalogue (handle: publications, plans and prices).
+ *   - Phases 1–4 (reader analytics): mounts routes/track.js at /api/track
+ *     (reading events from the web reader) and routes/adminAnalytics.js at
+ *     /api/admin/analytics (handle dashboards). Org Admin usage is
+ *     /api/org-admin/usage (routes/orgAdmin.js).
  */
 import express from 'express';
 import cors from 'cors';
@@ -36,6 +40,8 @@ import { invitesRouter } from './routes/invites.js';
 import { searchRouter } from './routes/search.js';
 import { catalogueRouter } from './routes/catalogue.js';
 import { adminCatalogueRouter } from './routes/adminCatalogue.js';
+import { adminAnalyticsRouter } from './routes/adminAnalytics.js';
+import { trackRouter } from './routes/track.js';
 
 const app = express();
 
@@ -55,6 +61,8 @@ app.use((req, res, next) => {
 app.use(attachUser);
 
 app.use('/api/editions', editionsRouter);
+// Reading events from the web reader (sendBeacon; Phases 1–4).
+app.use('/api/track', trackRouter);
 // Landing page: publications, latest editions, plans, the reader's access (Phase 0).
 app.use('/api/catalogue', catalogueRouter);
 app.use('/api/pay', paymentsRouter);
@@ -78,6 +86,8 @@ app.use('/api/org-admin', orgAdminRouter);
 app.use('/api/admin/organisations', adminOrgsRouter);
 // Publications, plans and prices (handle; changes need canManageOrganizations). Phase 0.
 app.use('/api/admin/catalogue', adminCatalogueRouter);
+// Reader analytics dashboards (handle; canManageOrganizations). Phases 1–4.
+app.use('/api/admin/analytics', adminAnalyticsRouter);
 app.use('/api/admin', adminRouter);
 // Story editor: /api/admin/editor/* -> apps/ingest (see routes/adminStories.js).
 app.use('/api/admin', adminStoriesRouter);

@@ -25,6 +25,7 @@ import {
   getEditionFor, pageImageUrl, editionCover, getStorefront, getCurrentPlans
 } from '../services/strapiClient.js';
 import { hasAccess, todayIso, getAccessProfile, readableRanges, normPub } from '../services/access.js';
+import { record } from '../services/analytics.js';
 
 export const editionsRouter = Router();
 
@@ -90,6 +91,18 @@ async function sendEdition(req, res, pub, rawDate) {
 
   const cover = editionCover(edition);
   const granted = await hasAccess({ userId: req.userId, publication: pub, from: cover.from, to: cover.to });
+
+  // Analytics: ?via= says where the reader came from (landing, archive, search, link).
+  const via = ['landing', 'archive', 'search', 'link', 'paper'].includes(req.query.via) ? req.query.via : 'link';
+  record(req, {
+    type: 'edition.open',
+    publication: pub,
+    editionDate: edition.date,
+    coversFrom: cover.from,
+    coversTo: cover.to,
+    locked: !granted,
+    meta: { via }
+  });
 
   const sortedPages = [...(edition.pages || [])].sort((a, b) => a.pageNumber - b.pageNumber);
   const basePages = sortedPages.map(p => ({ pageNumber: p.pageNumber, section: p.section }));

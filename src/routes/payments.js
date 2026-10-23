@@ -3,6 +3,7 @@ import fetch from 'node-fetch';
 import { config } from '../config.js';
 import { todayIso, invalidateAccess } from '../services/access.js';
 import { getCurrentPlans } from '../services/strapiClient.js';
+import { record } from '../services/analytics.js';
 
 export const paymentsRouter = Router();
 
@@ -64,6 +65,13 @@ paymentsRouter.post('/checkout', async (req, res) => {
   if (!phoneNumber || !paymentmethod || !planKey) {
     return res.status(400).json({ error: 'planKey, phoneNumber and paymentmethod are required' });
   }
+
+  // Analytics: the paper being read when checkout started (plans can be bundles).
+  record(req, {
+    type: 'checkout.start',
+    publication: req.body?.publication || null,
+    meta: { planKey: String(planKey).slice(0, 40) }
+  });
 
   const raw = Array.isArray(req.body?.dates) ? req.body.dates : (req.body?.date ? [req.body.date] : []);
   const editionDates = raw.map(d => (d === 'today' ? todayIso() : String(d))).filter(Boolean);

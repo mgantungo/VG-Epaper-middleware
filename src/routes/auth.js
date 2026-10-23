@@ -5,6 +5,7 @@ import {
 import {
   signAccessToken, signRefreshToken, verifyRefreshToken, REFRESH_COOKIE_NAME, REFRESH_COOKIE_MAX_AGE_MS
 } from '../services/tokens.js';
+import { record, recordRefresh } from '../services/analytics.js';
 
 export const authRouter = Router();
 
@@ -47,6 +48,7 @@ authRouter.post('/register', async (req, res) => {
   }
   const { user, tokenVersion } = result.data;
   setRefreshCookie(res, signRefreshToken(user.id, tokenVersion));
+  record(req, { type: 'auth.login', meta: { method: 'register' } }, { userId: user.id });
   res.json({ jwt: signAccessToken(user), user });
 });
 
@@ -64,6 +66,7 @@ authRouter.post('/login', async (req, res) => {
   }
   const { user, tokenVersion } = result.data;
   setRefreshCookie(res, signRefreshToken(user.id, tokenVersion));
+  record(req, { type: 'auth.login', meta: { method: 'password' } }, { userId: user.id });
   res.json({ jwt: signAccessToken(user), user });
 });
 
@@ -91,6 +94,7 @@ authRouter.post('/refresh', async (req, res) => {
     return res.status(401).json({ error: 'Session no longer valid — sign in again' });
   }
 
+  recordRefresh(req, profile.user.id);
   res.json({ jwt: signAccessToken(profile.user) });
 });
 

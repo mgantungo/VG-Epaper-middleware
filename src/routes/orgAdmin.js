@@ -23,6 +23,7 @@
  *   POST /api/org-admin/import/preview             multipart: file (.xlsx/.csv), defaults (JSON string, optional)
  *   POST /api/org-admin/import/:importId/commit
  *   GET  /api/org-admin/audit                      ?page&pageSize
+ *   GET  /api/org-admin/usage                      ?month=YYYY-MM  days and publications per member
  *
  * Mount in src/server.js:  app.use('/api/org-admin', orgAdminRouter);
  * Env: ORG_FEATURE_ENABLED=true (404 otherwise). Needs: npm i exceljs
@@ -95,6 +96,26 @@ orgAdminRouter.post('/members/:seatId/remove', forward('POST', (r) => `/members/
 orgAdminRouter.post('/members/:seatId/resend-invite', forward('POST', (r) => `/members/${r.params.seatId}/resend-invite`));
 orgAdminRouter.post('/members/:seatId/publications', forward('POST', (r) => `/members/${r.params.seatId}/publications`));
 orgAdminRouter.get('/audit', forward('GET', '/audit'));
+
+/**
+ * GET /api/org-admin/usage?month=YYYY-MM  (Phases 1–4)
+ * Which days each member was active and which publications they opened —
+ * never pages, sections or stories (agreed 23 Oct 2026).
+ */
+orgAdminRouter.get('/usage', async (req, res) => {
+  const month = /^\d{4}-\d{2}$/.test(String(req.query.month || '')) ? `?month=${req.query.month}` : '';
+  try {
+    const upstream = await fetch(`${config.strapiUrl}/api/analytics/portal/usage${month}`, {
+      headers: { Authorization: `Bearer ${config.strapiApiToken}`, 'x-actor-user-id': String(req.userId) }
+    });
+    const data = await upstream.json().catch(() => null);
+    if (!data) return res.status(502).json({ error: 'Usage service returned an unexpected response' });
+    res.status(upstream.status).json(data);
+  } catch (err) {
+    console.error('[orgAdmin] usage: could not reach Strapi:', err.message);
+    res.status(502).json({ error: 'Could not reach the usage service' });
+  }
+});
 
 orgAdminRouter.get('/import/template', async (req, res) => {
   try {
