@@ -6,7 +6,7 @@
  * GET /api/catalogue — everything the reader landing page draws, in one call:
  *   {
  *     today,
- *     titles: [{ title, colour, publications: [{ code, name, editionLabel,
+ *     titles: [{ title, colour, publications: [{ code, name, editionLabel, category,
  *                 language, frequency, scheduleNote, colour,
  *                 latestEdition: { date, coversFrom, coversTo, pageCount, coverUrl } | null,
  *                 access: { today, until, via: personal|organisation|null } | null }] }],
@@ -50,6 +50,7 @@ catalogueRouter.get('/', async (req, res) => {
         code: p.code,
         name: p.name,
         editionLabel: p.editionLabel,
+        category: p.category || 'newspaper',
         language: p.language,
         frequency: p.frequency,
         scheduleNote: p.scheduleNote,
